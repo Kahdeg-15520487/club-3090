@@ -166,6 +166,7 @@ Headline numbers for the four shipping models, computed from each per-model form
 | Qwen 3.6 35B-A3B (MoE) | 20,480 B / 10,240 B | 10,240 B / 5,120 B | **4,352 B / 2,176 B** (TQ3) | **0.31×** (~3.2× lighter) |
 | Gemma 4 31B | 163,840 B / 81,920 B | 81,920 B / 40,960 B | ~82,700 B / ~41,400 B (INT8 PTH) | **2.50×** (~2.5× heavier) |
 | Gemma 4 26B-A4B (MoE) | **10,240 B / 5,120 B** | 5,120 B / 2,560 B | ~5,170 B / ~2,585 B (INT8 PTH) | **0.16×** (~6.4× lighter) |
+| Gemma 4 E4B | 28,672 B / 14,336 B | 14,336 B / 7,168 B | n/a (bf16 only — no quant released yet) | **0.44×** (~2.3× lighter) |
 
 † Ratio at fp8_e5m2 TP=2 — pick this as the comparison anchor because it's a common production config. Ratios shift slightly under other formats but the family hierarchy is stable.
 
@@ -184,6 +185,7 @@ Headline numbers for the four shipping models, computed from each per-model form
 | **Qwen 3.6 35B-A3B** | 40 | **10** (gated attention at idx 3,7,11,15,19,23,27,31,35,39) | 30 (Gated DeltaNet) | **2** | 256 | No (×2) | **Yes (256×8)** | `full_attention_interval=4`: every 4th layer is attention. Built-in MTP (`mtp_num_hidden_layers=1`). `attn_output_gate=True` (gated attention). Vision-capable. Active params ~3B, total 35B. |
 | **Gemma 4 31B** | 60 | 10 (full-attention) | 50 (SWA, window=1024) | 16 | 256 sliding / **512 global** | Yes (×1) | No | Global layers use 2× head_dim of sliding layers. K=V tying confirmed empirically against boot-log KV cache reports. |
 | **Gemma 4 26B-A4B** | **30** | **5** (full-attention at idx 5,11,17,23,29) | 25 (SWA, window=1024) | **8 sliding / 2 global** (asymmetric) | 256 sliding / **512 global** | **Yes (×1)** | **Yes (128×8)** | Asymmetric KV-head split per layer type. Every 6th layer is global, last layer always global. Per-token growing KV is **~16× smaller** than Gemma 4 31B (see [Gemma section](#gemma-4-26b-a4b-moe--per-card-budget-components)). Vision + audio support. **No Genesis required.** |
+| **Gemma 4 E4B** | 42 | 7 (full-attention) | 35 (SWA, window=512) | 2 (uniform, no asymmetric split) | 256 sliding / **512 global** | **No (×2)** | No | **Untied K/V** (`attention_k_eq_v=false`) — the ONLY Gemma-4 family member without K=V tying (every sibling above is `Yes`). Half the context ceiling (128K vs 256K) and half the sliding window (512 vs 1024) of 12B/26B-A4B/31B. `num_kv_shared_layers=18` (of 42) — an unmodeled cross-layer KV-sharing quirk, see [Gemma 4 E4B section](#gemma-4-e4b--per-card-budget-components). Vision + audio. No Genesis required. **Not kv-calc-modeled** (`kv_calc_supported: false`). |
 
 > **MoE column format**: `N×K` = `num_experts × num_experts_per_tok` (e.g. "256×8" = 256 experts, 8 active per token).
 
@@ -696,6 +698,93 @@ Same empirical form as Gemma 4 31B; standard `0.5 + 1.0 × mem_util + 0.3 × (TP
 | **Predicted peak** | **~10-12 GB** | Massive headroom on 24 GB; could likely run at higher mem_util or push to BF16 KV at full 262K |
 
 **Calibration pending**. The headline finding to verify on first boot: Gemma 4 26B-A4B at full 262K context should fit on a single 3090 with INT4 weights — single-card serving may be the right default for this model.
+
+## Gemma 4 E4B — per-card budget components
+
+**Status**: config-verified (sourced directly from `google/gemma-4-E4B-it` `config.json`), **not kv-calc-modeled** — see "Architectural quirk" below. Unlike every other model in this section, this one was catalogued without a real boot. Treat every number here as a hand-derived projection, not a measurement.
+
+### Architecture summary
+
+Gemma 4 E4B is a Gemma 4 dense model (`model_type: gemma4`, `architectures: Gemma4ForConditionalGeneration` — the SAME arch class as 31B, NOT the 12B "unified"/encoder-free variant):
+
+- **42 transformer layers** (vs 31B's 60, 26B-A4B's 30)
+- `layer_types` array confirms **7 full_attention layers at indices [5, 11, 17, 23, 29, 35, 41]** + **35 sliding_attention layers** — same "every 6th layer is global, last layer always global" convention as the rest of the family
+- `sliding_window: 512` — HALF of 12B/26B-A4B/31B's `1024` (E2B/E4B-specific per the model card)
+- **`attention_k_eq_v: FALSE`** — the architectural surprise. Every other shipped Gemma-4 family member (12B, 26B-A4B, 31B) ties K==V (`k_v_tensors=1`); this model stores them independently (`k_v_tensors=2`). Confirmed straight from `config.json`, not inferred.
+- `num_key_value_heads: 2` uniformly for BOTH sliding and global layers (`num_global_key_value_heads` is `null` in config — no asymmetric split like 26B-A4B's 8-sliding/2-global) — caps `valid_tp` at `[1, 2]`
+- `head_dim: 256` (sliding), `global_head_dim: 512` (global) — same asymmetry pattern as the rest of the family
+- `max_position_embeddings: 131072` — 128K, HALF of 12B/26B-A4B/31B's 256K
+- `num_kv_shared_layers: 18` (of 42) — a cross-layer KV-cache-sharing mechanism NOT present on 31B (whose same config field reads `0`). No field in this repo's `ModelProfile` schema models it, and `tools/kv-calc.py` has no concept of shared layers. Every KV estimate below therefore treats all 42 layers as independently growing — a conservative upper bound. Real usable ctx/concurrency is expected to be *at least* as good as projected here.
+- Multimodal: vision (`vision_config`) + audio (`audio_config`) — same as 12B/26B-A4B
+- Not MoE (`enable_moe_block: false`, `num_experts: null`)
+- Total params: 7,996,156,490 (measured from the safetensors index — "~8B with embeddings" per the model card; "~4.5B effective" via Per-Layer Embeddings, which only affects on-device/mobile memory accounting — for GPU serving the full 8B is what's loaded, no separate PLE term needed)
+
+### Architectural quirk: kv-calc.py cannot model this spec safely, as-is
+
+`tools/kv-calc.py`'s `gemma4-swa-dense` branch (the formula used for 12B/26B-A4B/31B) hardcodes `k_v_tensors=1` for both the growing and sliding-fixed terms — it has no per-spec override for `attention_k_eq_v=False`. Pointing the existing branch at this model unmodified would silently **under-predict KV usage by 2×** (the dangerous direction: real usage could exceed the prediction — the inverse of the more commonly-seen "missed K=V tying" pitfall in the table above, which over-predicts). `scripts/lib/profiles/models/gemma-4-e4b.yml` sets `kv_calc_supported: false` for exactly this reason — `kv-calc.py --model gemma-4-e4b` does not exist (not wired into the tool's `MODEL_SPECS`). The math below is hand-derived instead, applying `k_v_tensors=2` correctly throughout.
+
+### 1. Model weights
+
+| Quant | On-disk | Per-card at TP=2 | Notes |
+|---|---:|---:|---|
+| **bf16** (`google/gemma-4-E4B-it`) | ~14.9 GB (7,996,156,490 params × 2 bytes, measured) | ~7.45 GB | ONLY shipped format — no Intel AutoRound / cyankiwi AWQ release exists yet (confirmed via authenticated HF API: both 404) |
+
+Not quantization-urgent: at ~7.45 GB/card (TP=2), this is already the lightest weights footprint in the whole Gemma 4 family by a wide margin (31B: 9-29 GB/card depending on quant; 26B-A4B: 6.5-8 GB/card).
+
+### 2. KV pool — growing portion (7 full-attention layers, UNTIED)
+
+```
+per_token_bytes_growing = num_full_attn_layers × num_kv_heads × global_head_dim × k_v_tensors=2 × bpe
+                        = 7 × 2 × 512 × 2 × bpe
+                        = 14,336 × bpe bytes   (TP=1)
+```
+
+| KV format | bpe | per-token growing KV (TP=1) | per-token (TP=2) |
+|---|---:|---:|---:|
+| `bf16` / `fp16` | 2.0 | 28,672 B (~28 KB) | 14,336 B |
+| `fp8_e5m2` | 1.0 | 14,336 B (~14 KB) | 7,168 B |
+
+Compare to 26B-A4B's growing KV (`5 × 2 × 512 × 1 × bpe = 5,120 × bpe`, TIED) — E4B's is ~2.8× heavier per token despite the SAME KV head count (2) and SAME global_head_dim (512), because the untied K/V (2× factor) more than offsets having only slightly more full-attention layers (7 vs 5). Still dramatically lighter than 31B's `10 × 16 × 512 × 1 × bpe = 81,920 × bpe` (tied) — ~5.7× lighter at bf16 despite the untied penalty, because 31B's 16 KV heads dominate.
+
+### 3. KV pool — fixed sliding portion (35 sliding_attention layers, UNTIED)
+
+```
+sliding_kv_bytes_total = num_sliding_attn_layers × num_kv_heads × head_dim × k_v_tensors=2 × bpe × sliding_window
+                       = 35 × 2 × 256 × 2 × bpe × 512
+                       = 36,700,160 × bpe bytes
+                       ≈ 35 MB × bpe total (TP=1) — negligible regardless of format
+```
+
+At bf16 (TP=1): ~70 MB total / ~35 MB at TP=2 per card. Trivial, as with every other family member's sliding term.
+
+### 4. Activation peak
+
+No calibration anchor (never booted). Projected by analogy: E4B's `hidden_size=2560` / `intermediate_size=10240` sit closer to 26B-A4B's scale (`hidden_size=2816`) than to 31B's (`hidden_size=5376`), so the working assumption used in the shipped compose is **~1.0-1.5 GB at TP=2** — closer to 26B-A4B's "~1-2 GB" than 31B's "~1.5-2.5 GB". This is a projection, not a measurement — treat it as the first thing to correct once a real boot log exists.
+
+### 5. Cudagraph + workspace overhead
+
+Same empirical form as the rest of the family (untuned for this model specifically — shared constant, deliberately not fit to a single anchor per the 12B calibration note's own caution against corrupting a shared term):
+```
+overhead = 0.5 + 1.0 × mem_util + 0.3 × (TP - 1)   # GB
+```
+At `mem_util=0.92`, `TP=2`: `0.5 + 0.92 + 0.3 = 1.72 GB/card`.
+
+### 6. Drafter (unused — MTP shipped disabled)
+
+`google/gemma-4-E4B-it-assistant` exists (~0.16 GB, measured from the safetensors file listing) and is registered as a compatible drafter, but the shipped compose does NOT invoke it — Gemma-4 MTP × tool-calling is broken family-wide on the vllm-stable engine (vLLM #39043; fix #42006 closed-unmerged — see `docs/UPSTREAM.md`). Same reason `gemma-31b-dual` and `gemma-4-12b-dual-mtp` ship without spec-dec.
+
+### Estimated per-card budget at TP=2, 24 GB VRAM, bf16 KV, 8 concurrent streams
+
+| Term | Value (bf16 KV, seqs=8) | Notes |
+|---|---:|---|
+| Weights / 2 | ~7.45 GB | Measured from safetensors index; only format available |
+| KV pool growing (@ 65536 ctx) | ~7.15 GB | `14,336 B/tok/card × 65,536 × 8 seqs`, requested — see note |
+| KV pool sliding | ~0.02 GB | Constant; trivially small |
+| Activation peak | ~1.0-1.5 GB | Projected by analogy to 26B-A4B; NOT calibrated |
+| Cudagraph + overhead | ~1.72 GB | Empirical fit (`mem_util=0.92`, `TP=2`) |
+| **Predicted peak** | **~17.3-17.8 GB** | Of a 22.08 GB budget (24 GB × 0.92) — ~4.3-4.8 GB margin |
+
+**Never calibrated.** The shipped compose (`models/gemma-4-e4b/vllm/compose/dual/bf16/base.yml`) ships at exactly this configuration (`MAX_MODEL_LEN=65536`, `MAX_NUM_SEQS=8`, `GPU_MEMORY_UTILIZATION=0.92`) with margin intentionally left against the above being a projection. The theoretical ceiling per this same math (using the full ~11.4 GB left after weights+overhead+activation, before adding safety margin) is closer to **~100-106K tokens per stream at seqs=8** — worth raising `MAX_MODEL_LEN` toward once a real boot log confirms the actual `Available KV cache` line (`docs/ADDING_MODELS.md` Steps 5-6).
 
 ## Best practices for building a KV calculator
 

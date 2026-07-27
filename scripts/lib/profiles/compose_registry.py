@@ -838,6 +838,23 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="AWQ + external MTP (gemma-26b-it-assistant n=4) on stock v0.22.0 — MTP +55% TPS (134->208, AL 3.55) validated 2026-06-05. Max ctx 262K (model max; KV pool 806,821 tok at 262144/0.92, 2x 3090) boot+coherence validated 2026-06-06. Promote after rebench-full + soak.",
     ),
+    # Gemma 4 E4B — the lightest model in the Gemma 4 family (~8B raw / ~4.5B effective
+    # params, dense gemma4-swa-dense — SAME family as 31B, NOT the 12B "unified" arch).
+    # Only bf16 weights exist upstream today (no AutoRound/AWQ release yet); tiny
+    # num_kv_heads=2 keeps even untied KV (attention_k_eq_v=false on THIS model only,
+    # unlike every other shipped Gemma-4 sibling) cheap. INCUBATING: authored without
+    # access to real dual-3090 hardware — see compose header for the full caveat list.
+    "vllm/gemma-e4b-dual-bf16": _entry(
+        model="gemma-4-e4b", weights_variant="bf16", workload="multi-stream-tenant", chat_template="gemma-canonical",
+        engine="vllm-stable", drafter=None, kv_format="bf16",  # MTP off family-wide on vllm-stable (vLLM #39043/#42006, same as gemma-31b-dual/gemma-4-12b-dual-mtp)
+        tp=2, max_ctx=65536, max_num_seqs=8, mem_util=0.92,
+        compose_path="models/gemma-4-e4b/vllm/compose/dual/bf16/base.yml",
+        default_port=8200,
+        kvcalc_key="SKIP",  # attention_k_eq_v=false breaks kv-calc's gemma4-swa-dense k_v_tensors=1 assumption — see model YAML
+        status="incubating",
+        status_note="NEW MODEL, UNVALIDATED — authored from an HF-config-only source pass (no real dual-RTX-3090 Linux hardware available this session). bf16-only (Intel AutoRound / cyankiwi AWQ haven't released E4B quants yet, confirmed via authenticated HF API 404s); ~7.45 GB/card weights at TP=2 leave large headroom. Sized for 8 CONCURRENT STREAMS @ 65536 ctx each (hand-derived KV math in the compose header — kv-calc.py doesn't model this spec's untied KV; k_v_tensors=2 vs the family's usual tied k_v_tensors=1). MTP drafter (google/gemma-4-E4B-it-assistant) exists but is shipped disabled — same family-wide Gemma-4 MTP x tool-calling bug blocking gemma-31b-dual. Needs: boot + verify-full + verify-stress + bench + soak + calibration (docs/ADDING_MODELS.md Steps 5-8) before promoting past incubating.",
+    ),
+
     "vllm/diffusiongemma-dual": _entry(
         model="diffusiongemma-26b-a4b", weights_variant="fp8", workload="fast-chat", chat_template="gemma-canonical",
         engine="vllm-diffusion-gemma", drafter=None, kv_format="bf16",

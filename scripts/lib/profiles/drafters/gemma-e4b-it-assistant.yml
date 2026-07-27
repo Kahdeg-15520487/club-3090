@@ -1,0 +1,25 @@
+schema_version: 1
+id: gemma-e4b-it-assistant
+display_name: Google Gemma 4 E4B MTP assistant
+spec_method: mtp_assistant
+model_compat:
+  - gemma-4-e4b
+n_default: 4
+n_max: 4
+download:
+  hf_repo: google/gemma-4-E4B-it-assistant
+  size_gb: 0.16
+  format: bf16
+vram_footprint_gb: 0.16
+status: experimental
+# Confirmed to exist on HF (Gemma4AssistantForCausalLM, ~159 MB safetensors) but NOT
+# currently wired into any shipped compose -- MTP is DISABLED family-wide on the
+# vllm-stable engine (v0.25.1) pending the same upstream bug that forces
+# gemma-31b-dual and gemma-4-12b-dual-mtp to ship without spec-dec: Gemma-4
+# MTP x tool-calling is broken (vLLM #39043; fix #42006 closed-unmerged, only
+# vendored on the older vllm-gemma-stable v0.22.0 engine). Kept here (profile +
+# weights declared) so re-enabling is a pure compose-diff once #39043/#42006 land
+# on a stable pin -- see the caveat block in
+# models/gemma-4-e4b/vllm/compose/dual/bf16/base.yml.
+speculative_config_template: '{"model":"{LOCAL_MODEL_PATH}","num_speculative_tokens":{N}}'
+local_model_path: /root/.cache/huggingface/gemma-4-e4b-it-assistant
