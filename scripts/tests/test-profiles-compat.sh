@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Force Python's UTF-8 mode (PEP 540) for every python3 this script runs.
+# Repo sources are full of unicode (— × → ⚠), and without this a rig on a real
+# non-UTF-8 locale (de_DE.iso88591 and friends) decodes reads, stdout AND argv
+# with the locale codec, which crashes the launcher/emit paths (#779). Python
+# already auto-enables UTF-8 mode for the C/POSIX locale, so this covers the
+# case it does NOT: a genuine non-UTF-8, non-C locale. Exported, so child
+# processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
@@ -24,11 +33,11 @@ run_test "load_profiles parses all profile groups" <<'PY'
 from scripts.lib.profiles.compat import load_profiles
 p = load_profiles()
 assert len(p.hardware) == 10  # +dgx-spark (#576 follow-up)
-assert len(p.models) == 14
+assert len(p.models) == 15  # +gemma-4-e4b
 assert len(p.workloads) == 5
 assert len(p.engines) == 13
-assert len(p.drafters) == 15
-assert len(p.calibration) == 5
+assert len(p.drafters) == 16  # +gemma-e4b-it-assistant
+assert len(p.calibration) == 6  # +gemma-4-e4b (empty rows, pending real boot)
 PY
 
 run_test "fits() happy path: Qwen dual on 2x3090" <<'PY'

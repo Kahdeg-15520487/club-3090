@@ -52,6 +52,15 @@
 
 set -euo pipefail
 
+# Force Python's UTF-8 mode (PEP 540) for every python3 this script runs.
+# Repo sources are full of unicode (— × → ⚠), and without this a rig on a real
+# non-UTF-8 locale (de_DE.iso88591 and friends) decodes reads, stdout AND argv
+# with the locale codec, which crashes the launcher/emit paths (#779). Python
+# already auto-enables UTF-8 mode for the C/POSIX locale, so this covers the
+# case it does NOT: a genuine non-UTF-8, non-C locale. Exported, so child
+# processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+
 # The VRAM-budget block formats dot-decimal numbers emitted by kv-calc.py JSON
 # (e.g. "9.0") with `printf "%.2f"`. Under a comma-decimal LC_NUMERIC locale
 # (de_DE, fr_FR, …) bash printf rejects the dot — `printf: 9.0: invalid number`
@@ -1274,6 +1283,11 @@ if [[ -z "$VARIANT" ]]; then
   echo "[launch] model: $(model_label "$MODEL_NAME")" >&2
   if (( HET_VRAM_MIXED == 1 && TP_VALUE > 1 )); then
     echo "[launch] Note: heterogeneous TP is bottlenecked by the smallest selected card (${MIN_VRAM_GB} GB)." >&2
+    # This note is about CAPACITY only. Architecture heterogeneity is a separate
+    # and more dangerous axis, checked in preflight.sh (mixed-arch TP guard, #762):
+    # a 3090+4090 pair has equal 24 GB and never trips this VRAM check at all,
+    # despite spanning sm_86/sm_89.
+    echo "[launch]       (VRAM only -- architecture mismatch is checked separately; see #762.)" >&2
   fi
   if (( PP_VALUE > 1 )) && [[ "$VARIANT" == vllm/* ]]; then
     echo "[launch] WARN: PP + vLLM drafter/spec-decode paths are experimental on this stack." >&2

@@ -1,0 +1,18 @@
+schema_version: 1
+model: gemma-4-e4b
+# EMPTY BY DESIGN. This model was catalogued (ModelProfile + compose + registry)
+# from an authoring session with no access to real dual-RTX-3090 Linux hardware --
+# only architecture facts sourced from config.json / the HF model card, plus
+# hand-derived (not kv-calc-tool-verified; see kv_calc_supported: false in
+# scripts/lib/profiles/models/gemma-4-e4b.yml) VRAM projections. No boot has
+# happened yet, so there is nothing measured to calibrate against.
+#
+# vllm/gemma-e4b-dual-bf16 uses kvcalc_key="SKIP" for the same reason kv-calc.py
+# doesn't model this spec (attention_k_eq_v=false breaks the gemma4-swa-dense
+# branch's hardcoded K==V-tied assumption -- see the model YAML comment).
+#
+# When this ships on real hardware (docs/ADDING_MODELS.md Steps 5-7): capture
+# `docker logs <container> | grep -iE "kv cache|available"`, add a row here, and
+# reconsider kv_calc_supported once kv-calc.py grows a k_v_tensors override (or a
+# dedicated untied-KV branch) for the gemma4-swa-dense family.
+rows: []

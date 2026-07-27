@@ -1,0 +1,110 @@
+schema_version: 1
+id: gemma-4-e4b
+display_name: Gemma 4 E4B
+family: gemma4-swa-dense               # SAME family as gemma-4-31b: dense (no MoE), SWA/full-attn
+                                        # hybrid, tower-based Gemma4ForConditionalGeneration (NOT the
+                                        # 12B's encoder-free "Unified" arch). No engine/hardware YAML
+                                        # changes needed — inherits vllm-stable's existing
+                                        # gemma4-swa-dense compat declaration.
+
+# --- Architecture facts, sourced from google/gemma-4-E4B-it config.json (text_config) ---
+hidden_size: 2560
+intermediate_size: 10240
+num_hidden_layers: 42
+# layer_types: every 6th layer is full_attention, last layer always global
+# (family convention) -> indices [5,11,17,23,29,35,41] = 7 full-attention layers.
+num_full_attn_layers: 7
+num_sliding_attn_layers: 35
+num_attn_heads: 8
+num_kv_heads: 2                        # uniform sliding+global (config num_global_key_value_heads
+                                        # is null -> same as sliding; do NOT set num_global_kv_heads)
+head_dim_sliding: 256
+global_head_dim: 512
+sliding_window: 512                    # NOTE: 512, not 1024 like 12B/26B-A4B/31B (E2B/E4B-specific)
+max_ctx_supported: 131072              # 128K -- HALF the 256K ceiling of 12B/26B-A4B/31B. Model
+                                        # card table confirms "Context Length: 128K tokens" for E4B.
+# attention_k_eq_v is FALSE here -- this is the one field that is NOT a copy-paste
+# of the 31B/26B-A4B/12B convention. Confirmed straight from config.json text_config
+# ("attention_k_eq_v": false), in contrast to every other shipped Gemma-4 family
+# member (all `true`). K and V are stored INDEPENDENTLY on this model (k_v_tensors=2),
+# so per-token growing/sliding KV bytes are 2x what the "K==V tied" family formula
+# assumes. See the kv_calc_supported note below -- this is exactly why it's false.
+attention_k_eq_v: false
+vision_capable: true                   # vision + audio (model card: "Supported Modalities: Text,
+                                        # Image, Audio" for E2B/E4B/12B). No dedicated audio field
+                                        # in this schema (matches sibling profiles) -- see README.
+
+# --- Upstream quirk NOT modeled by this schema (documented, not silently dropped) ---
+# config.json text_config also carries `num_kv_shared_layers: 18` (of 42 total) -- a
+# cross-layer KV-cache-sharing mechanism (18 layers reuse another layer's KV instead
+# of maintaining their own). gemma-4-31b's OWN config carries the same field at value
+# 0 (no sharing), which is why the family formula below never needed to model it.
+# E4B is the first family member where this is nonzero. There is no ModelProfile field
+# for it and kv-calc.py's gemma4-swa-dense branch has no concept of shared layers.
+# Net effect: every KV-sizing estimate in this repo for E4B (see compose header +
+# models/gemma-4-e4b/README.md) treats all 42 layers as independently growing --
+# a conservative UPPER BOUND. Real usable ctx/concurrency is expected to be AT LEAST
+# as good as projected, likely better. Refine once a real boot log is captured
+# (Step 5/6 of docs/ADDING_MODELS.md) and/or vLLM's actual gemma4 KV accounting for
+# this field is understood.
+
+weights:
+  bf16:
+    path: gemma-4-e4b-it
+    local_subdir: gemma-4-e4b-it
+    size_gb: 14.9                      # measured: safetensors total params 7,996,156,490 (BF16)
+                                        # x 2 bytes = 14.895 GiB ("8B with embeddings" per model card,
+                                        # PLE tables included in the on-disk/in-VRAM count -- no
+                                        # separate PLE accounting needed for GPU serving).
+    format: bf16
+    status: experimental               # unvalidated on real hardware from this authoring session
+                                        # (no dual-3090 Linux box available) -- promote to production
+                                        # once Steps 5-8 of ADDING_MODELS.md run for real.
+    hf_repo: google/gemma-4-E4B-it
+    hf_repos:
+      - google/gemma-4-E4B-it
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
+  assistant:
+    path: gemma-4-e4b-it-assistant
+    local_subdir: gemma-4-e4b-it-assistant
+    size_gb: 0.16                      # measured: model.safetensors = 159,138,208 bytes on disk
+    format: bf16
+    status: experimental
+    hf_repo: google/gemma-4-E4B-it-assistant
+    hf_repos:
+      - google/gemma-4-E4B-it-assistant
+    engine: vllm
+    kind: draft
+    verify_glob: "*.safetensors"
+default_weight_variant: bf16           # ONLY shipped quant today -- Intel AutoRound INT4 and cyankiwi
+                                        # AWQ (the usual third-party quantizers for this family) have
+                                        # NOT released gemma-4-E4B-it variants as of this writing
+                                        # (confirmed via authenticated HF API lookup, both 404).
+                                        # Not urgent: bf16 weights are only ~7.5 GB/card at TP=2, so
+                                        # quantization isn't needed to fit -- unlike 26B-A4B/31B.
+compatible_drafters:
+  - gemma-e4b-it-assistant              # exists on HF (google/gemma-4-E4B-it-assistant,
+                                        # Gemma4AssistantForCausalLM, ~0.16 GB) -- declared here for
+                                        # when MTP is re-enabled (see compose header: MTP is shipped
+                                        # DISABLED family-wide on vllm-stable pending vLLM #39043).
+valid_tp:
+  - 1                                  # single-card: weights fit trivially (~14.9 GB), but not the
+                                        # user's target topology for this catalog entry (dual-only
+                                        # composes shipped so far) -- listed for architecture honesty.
+  - 2                                  # num_kv_heads=2 caps TP at divisors of 2 -> only [1, 2] valid
+                                        # (TP=4/8 would need KV-head replication this family's fits()
+                                        # convention doesn't grant -- same rule 26B-A4B's asymmetric
+                                        # global heads already established).
+requires_genesis: false                # Gemma 4 family never needs Genesis (no DeltaNet quirks)
+
+# kv-calc.py's "gemma4-swa-dense" branch HARDCODES k_v_tensors=1 (K==V tied) for both
+# the growing and sliding-fixed terms -- correct for 12B/26B-A4B/31B, but WRONG for
+# this model (attention_k_eq_v=false above -> k_v_tensors=2). Naively enabling C12
+# here would silently UNDER-predict KV usage by 2x (the dangerous direction -- real
+# usage could exceed the tool's prediction). Until kv-calc.py either grows a
+# per-model k_v_tensors override or a dedicated "gemma4-swa-dense-untied" branch,
+# this stays unsupported. All sizing in the shipped compose is hand-derived with
+# k_v_tensors=2 applied correctly (see models/gemma-4-e4b/README.md "KV math").
+kv_calc_supported: false

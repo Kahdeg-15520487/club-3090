@@ -60,6 +60,14 @@ def _entry(
     # its weights are positive-symmetric int4 (the c3 serve-confirm checkbox reads
     # this to offer VLLM_MARLIN_INPUT_DTYPE=int8 per-launch). #609.
     act8_capable=False,
+    # Weight-offload backend when the slug serves a model too large to fit VRAM
+    # by paging expert/layer weights to host RAM. None = fully resident (the
+    # default — every existing slug). "uva" = vLLM zero-copy demand-paged expert
+    # offload (GPU computes, weights stream over PCIe); "n-cpu-moe" = llama.cpp
+    # CPU-computed expert offload (weights stay in RAM, only activations cross
+    # PCIe); "prefetch" = vLLM bulk layer prefetch. Surfaced as the c3 catalog
+    # "offload" column. First used by the Laguna 118B-MoE offload slugs.
+    offload=None,
     chat_template="native",
     tp,
     max_ctx,
@@ -69,6 +77,28 @@ def _entry(
     default_port,
     kvcalc_key=None,
     requires_nvlink=False,
+    # True when the slug has an ARCH-GATED kernel path that torch.compile (or a
+    # hardcoded quant-method kernel) emits PER RANK, so a mixed-compute-capability
+    # TP group must be REFUSED rather than warned. The canonical case is a
+    # quantization method that bypasses the shared kernel selector and therefore
+    # has no per-rank fallback to reach — nvidia modelopt NVFP4 hardcodes
+    # FlashInferFP8ScaledMMLinearKernel for its FP8 attention layers, so a
+    # sub-sm_90 rank in the group dies even though `fallback_sm` says that card
+    # is individually fine (fallback_sm reasons per card; the weight-only
+    # fallback is a property of the whole TP GROUP).
+    #
+    # ⚠️ NOT every NVFP4 slug: compressed-tensors exports (unsloth `nvfp4-fast`,
+    # migtissera tess) route through init_fp8_linear_kernel() -> shared selector,
+    # where Marlin IS reachable — mixed-arch is solvable there and gating them
+    # would foreclose it (validated on DiffusionGemma, disc #768 Test 6).
+    # The axis is the QUANT RUNTIME, not the weights_variant string.
+    #
+    # Mirrored by `# Requires-homogeneous-arch: true` in the compose header,
+    # which is what preflight.sh actually reads. `test-homogeneous-arch-drift`
+    # asserts the two agree in BOTH directions — #762 shipped the guard on only
+    # the reported slug and the 35B-A3B sibling silently kept crash-looping
+    # (#783). TP=1 slugs never need this: there is no TP group to disagree.
+    requires_homogeneous_arch=False,
     required_engine_features=None,
     recommended_engine_features=None,
     required_sm=None,
@@ -92,6 +122,7 @@ def _entry(
         "kv_format": kv_format,
         "act_format": act_format,
         "act8_capable": act8_capable,
+        "offload": offload,
         "chat_template": chat_template,
         "tp": tp,
         "pp": 1,
@@ -100,6 +131,7 @@ def _entry(
         "mem_util": mem_util,
         "compose_path": compose_path,
         "requires_nvlink": requires_nvlink,
+        "requires_homogeneous_arch": requires_homogeneous_arch,
         "required_engine_features": list(required_engine_features or []),
         "default_port": default_port,
         "gpu_assignment_mode": "contiguous",
@@ -270,8 +302,10 @@ COMPOSE_REGISTRY = {
     # here): required_sm=9.0 gates launch to NVIDIA's supported set (Hopper
     # sm_90 / Blackwell sm_100+ incl. 5090 sm_120, GB10 sm_121); the first
     # community booter is the validation, not a confirmation. NVFP4 *KV* stays
-    # off everywhere (consumer Blackwell has no FP4 FMHA — see hardware
-    # rtx-5090.yml note); fp8_e4m3 KV is the FP4-era KV. NOTE (corrected
+    # off everywhere (stock consumer Blackwell has no FP4 FMHA route — see the
+    # hardware rtx-5090.yml note, incl. the 2026-07-26 correction: a community
+    # FA2+XQA route DOES reach FP4 KV on sm_120, we stay closed pending
+    # vllm#44851); fp8_e4m3 KV is the FP4-era KV. NOTE (corrected
     # 2026-07-06): hf_quant_config DECLARES kv_cache_quant_algo=FP8 but the
     # checkpoint ships NO k_scale/v_scale tensors (index-verified) → runs at
     # scale=1.0, the #594-quality-tied regime. Same for the 35B-A3B sibling.
@@ -291,9 +325,10 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/nvfp4/mtp.yml",
         default_port=8077, required_sm=9.0, fallback_sm=7.5,
+        requires_homogeneous_arch=True,
         kvcalc_key="qwen3.6-27b:nvfp4-dual",
         status="experimental",
-        status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION — see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (the 2x 5090 configuration is the primary community target; fallback_sm=7.5). LIVE-VALIDATED ON 2x3090 sm_86 2026-07-11 via the Marlin W4A16 fallback: boots @262K + fp8 KV + MTP n=3 (accept 97%+), 69.7 narr / 85.5 code decode TPS, 23.77 GB/card, 8-pack think-off 110/150 — statistically TIES the fp8 production tier's 109 (weight-identical path; native-FP4 activations unmeasured). On Ampere it works but has NO edge (~20% slower than the AutoRound tier for the same model) — prefer AutoRound/fp8 there; this slug's value on sub-sm_90 cards is models/cases where NVFP4 is the only quant. First native-FP4 community boot + rebench-full still wanted (funnel). Mirrors vllm/qwen-27b-dual-max's shape (TP=2 + MTP n=3 + fp8/e4m3 KV + vision @262K) with NVFP4 weights instead of FP8: ~11 GB/card weights vs dual-max's 14.5 — bigger KV pool headroom on 32 GB cards. On native-FP4 GEMM parts (Blackwell) NVIDIA claims near-fp8 throughput at 2.5x less weight memory. No DEFAULTS row (opt-in only).",
+        status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION — see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (the 2x 5090 configuration is the primary community target; fallback_sm=7.5). HOMOGENEOUS RIGS ONLY (#762 @paulp83): mixed-arch TP crashes in torch.compile AOT -- a 5090 sm_120 + 3090 Ti sm_86 pair loads weights fine via the Marlin fallback, then the Inductor emits `tl.float8e4nv` MXFP8 ACTIVATION kernels the Ampere rank cannot compile (`type fp8e4nv not supported in this architecture`); TP1 dies, TP0 hangs on the broadcast. fallback_sm reasons PER CARD but the weight-only fallback is a property of the whole TP GROUP -- guarded from 2026-07-26 by Requires-homogeneous-arch in preflight. LIVE-VALIDATED ON 2x3090 sm_86 (HOMOGENEOUS) 2026-07-11 via the Marlin W4A16 fallback: boots @262K + fp8 KV + MTP n=3 (accept 97%+), 69.7 narr / 85.5 code decode TPS, 23.77 GB/card, 8-pack think-off 110/150 — statistically TIES the fp8 production tier's 109 (weight-identical path; native-FP4 activations unmeasured). On Ampere it works but has NO edge (~20% slower than the AutoRound tier for the same model) — prefer AutoRound/fp8 there; this slug's value on sub-sm_90 cards is models/cases where NVFP4 is the only quant. First native-FP4 community boot + rebench-full still wanted (funnel). Mirrors vllm/qwen-27b-dual-max's shape (TP=2 + MTP n=3 + fp8/e4m3 KV + vision @262K) with NVFP4 weights instead of FP8: ~11 GB/card weights vs dual-max's 14.5 — bigger KV pool headroom on 32 GB cards. On native-FP4 GEMM parts (Blackwell) NVIDIA claims near-fp8 throughput at 2.5x less weight memory. No DEFAULTS row (opt-in only).",
     ),
 
     # Qwen 3.6 27B, llama.cpp single-card.
@@ -762,8 +797,8 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8065,
         kvcalc_key="SKIP",
-        status="experimental",
-        status_note="Dual-card beellama Qwen3.6-27B Q8_K_XL + DFlash (Anbeeld DFlash-IQ4_XS draft, --spec-type dflash). v0.3.0 sm_86 2026-06-01: boots + coherent at full 262K (fixed draft footprint; tensor-split 0.575,0.425 → ~21.2 GB/card). DFlash prose net-positive on tok/s (+52% vs no-spec @262K, re-tested 2026-06-03; earlier 'prose regression' RETRACTED — AR over-read + wrong baseline). Tool-grammar-neutral spec-dec for Qwen agents (club-3090#237). Promote on a STABLE tag.",
+        status="upstream-gated",
+        status_note="⏸️ UPSTREAM-GATED — cannot load on the pinned image, and the pin bump that would fix loading breaks context instead. Failure on the current pin: Anbeeld re-exported the drafter repo in upstream format 2026-07-19 and dropped IQ4_XS, and our pinned v0.3.2-preview digest is a fork build whose llama.cpp base predates the current Qwen3.6 GGUF conversion — it refuses the new-format drafter (missing hidden_norm.weight) and the referenced anbeeld-dflash-iq4xs artifact no longer exists. CORRECTION 2026-07-26: an earlier note said this and the Ada gibberish (#693) 'both un-break on v0.4.0' — FALSE. v0.4.x swaps fork-DFlash for upstream draft-dflash, which OOMs card0 at 262K (live Ampere 2026-07-21; single 102K->27K). Anbeeld closed our Anbeeld#98 as won't-fix (upstream architecture), and v0.4.1 stable is the SAME COMMIT as the preview we OOM'd on. Blocked on an upstream llama.cpp memory fix, not a pin bump; queued for retirement with the beellama engine (todo 2026-07-26). Re-statused from experimental 2026-07-26 per #740. HISTORICAL: v0.3.0 sm_86 2026-06-01 booted + coherent at 262K, code accept 0.58 / prose ~0.41.",
     ),
     "beellama/gemma-q8-dflash-dual": _entry(
         model="gemma-4-31b", weights_variant="beellama-q8kxl-dflash", workload="fast-chat",
@@ -815,6 +850,23 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="AWQ + external MTP (gemma-26b-it-assistant n=4) on stock v0.22.0 — MTP +55% TPS (134->208, AL 3.55) validated 2026-06-05. Max ctx 262K (model max; KV pool 806,821 tok at 262144/0.92, 2x 3090) boot+coherence validated 2026-06-06. Promote after rebench-full + soak.",
     ),
+    # Gemma 4 E4B — the lightest model in the Gemma 4 family (~8B raw / ~4.5B effective
+    # params, dense gemma4-swa-dense — SAME family as 31B, NOT the 12B "unified" arch).
+    # Only bf16 weights exist upstream today (no AutoRound/AWQ release yet); tiny
+    # num_kv_heads=2 keeps even untied KV (attention_k_eq_v=false on THIS model only,
+    # unlike every other shipped Gemma-4 sibling) cheap. INCUBATING: authored without
+    # access to real dual-3090 hardware — see compose header for the full caveat list.
+    "vllm/gemma-e4b-dual-bf16": _entry(
+        model="gemma-4-e4b", weights_variant="bf16", workload="multi-stream-tenant", chat_template="gemma-canonical",
+        engine="vllm-stable", drafter=None, kv_format="bf16",  # MTP off family-wide on vllm-stable (vLLM #39043/#42006, same as gemma-31b-dual/gemma-4-12b-dual-mtp)
+        tp=2, max_ctx=65536, max_num_seqs=8, mem_util=0.92,
+        compose_path="models/gemma-4-e4b/vllm/compose/dual/bf16/base.yml",
+        default_port=8200,
+        kvcalc_key="SKIP",  # attention_k_eq_v=false breaks kv-calc's gemma4-swa-dense k_v_tensors=1 assumption — see model YAML
+        status="incubating",
+        status_note="NEW MODEL, UNVALIDATED — authored from an HF-config-only source pass (no real dual-RTX-3090 Linux hardware available this session). bf16-only (Intel AutoRound / cyankiwi AWQ haven't released E4B quants yet, confirmed via authenticated HF API 404s); ~7.45 GB/card weights at TP=2 leave large headroom. Sized for 8 CONCURRENT STREAMS @ 65536 ctx each (hand-derived KV math in the compose header — kv-calc.py doesn't model this spec's untied KV; k_v_tensors=2 vs the family's usual tied k_v_tensors=1). MTP drafter (google/gemma-4-E4B-it-assistant) exists but is shipped disabled — same family-wide Gemma-4 MTP x tool-calling bug blocking gemma-31b-dual. Needs: boot + verify-full + verify-stress + bench + soak + calibration (docs/ADDING_MODELS.md Steps 5-8) before promoting past incubating.",
+    ),
+
     "vllm/diffusiongemma-dual": _entry(
         model="diffusiongemma-26b-a4b", weights_variant="fp8", workload="fast-chat", chat_template="gemma-canonical",
         engine="vllm-diffusion-gemma", drafter=None, kv_format="bf16",
@@ -873,6 +925,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/nvfp4/fp8.yml",
         default_port=8079, required_sm=9.0, fallback_sm=7.5,
+        requires_homogeneous_arch=True,
         kvcalc_key="qwen3.6-35b-a3b:nvfp4-dual",
         status="experimental",
         status_note="Qwen3.6-35B-A3B NVFP4 (see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (2x 5090 primary community target; ~11.7 GB/card weights; fallback_sm=7.5 — sub-9.0 cards run it via the Marlin W4A16 fallback, validated on the 27B sibling 2026-07-11, though on Ampere the AutoRound tier serves this model faster). 🧪 first community boot + rebench-full validates. Mirrors vllm/qwen-35b-a3b-dual's shape (no drafter — MTP net-negative on this MoE, vision on, thinking off) with NVFP4 weights + fp8/e4m3 KV instead of AutoRound + e5m2. No DEFAULTS row (opt-in only).",
@@ -997,6 +1050,7 @@ COMPOSE_REGISTRY = {
         tp=4, max_ctx=200000, max_num_seqs=1, mem_util=0.85,
         compose_path="models/nemotron-3-puzzle-75b/vllm/compose/multi4/nvfp4/mtp.yml",
         default_port=8095, required_sm=9.0, fallback_sm=7.5,
+        requires_homogeneous_arch=True,
         kvcalc_key="SKIP",
         status="caveats",
         status_note="Nemotron-3 Puzzle 75B-A9B NVFP4 (nvidia modelopt MIXED: NVFP4 routed-expert FFNs + FP8 Mamba/shared projections), 4-card TP=4 @200K single-stream, built-in MTP via --speculative-config. Mamba2-Transformer hybrid LatentMoE, 9.3B active / 75.3B total. 🧪 Experimental — CANNOT be booted/validated on the maintainer's 2x3090 rig (needs 4x3090); shown in switch.sh --list, launch requires --force. fp8_e4m3 attention KV (checkpoint-declared) + fp16 Mamba SSM state (stochastic-rounded; never fp8). kv-calc bypassed (hybrid arch, no spec → kvcalc SKIP + model kv_calc_supported=false). NVIDIA supported-HW = Blackwell+Hopper ONLY; arch NemotronHPuzzleForCausalLM aliases to the NemotronH loader (registered v0.24.0 + v0.25.0; card tested v0.20.0) and CONFIRMED to run on 4x3090 (#706, @TheFuzy: weights 13.31 GiB/card, arch/quant/mamba/MTP all work on Ampere). This config is FIT-TUNED for 24 GB after our first cut OOM'd at 262K single-stream (profile-run prefill blew up with chunked-prefill off): chunked prefill ON + max-num-batched-tokens 8192 + max-model-len 200000 + fp8 KV. Concurrency (max_num_seqs>1 + --long-prefill-token-threshold) is a follow-up gated on a community VRAM report. FP8 sibling (83 GB) too big for 4x24GB → NVFP4 is the only quad-3090 fit. No DEFAULTS row (opt-in only). Community-float to 4x3090 owners.",
