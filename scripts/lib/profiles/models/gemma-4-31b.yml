@@ -127,9 +127,22 @@ weights:
     status: experimental
     hf_repo: Anbeeld/gemma-4-31B-it-DFlash-GGUF
     files:
-      - gemma4-31b-it-dflash-IQ4_XS.gguf
+      - gemma4-31b-it-dflash-Q4_K_M.gguf
     engine: beellama
     kind: draft
+  artemis-q4km-dflash:
+    path: artemis-31b-gguf
+    local_subdir: artemis-31b-gguf
+    size_gb: 18.0
+    format: gguf
+    status: experimental
+    hf_repo: BeaverAI/Artemis-31B-v1m-GGUF
+    files:
+      - Artemis-31B-v1m-Q4_K_M.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+
     verify_glob: "*.gguf"
 default_weight_variant: autoround-int4
 compatible_drafters:

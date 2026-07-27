@@ -777,6 +777,18 @@ COMPOSE_REGISTRY = {
         status_note="Dual-card beellama Gemma-4-31B Q8_K_XL + DFlash (Anbeeld DFlash-IQ4_XS draft). v0.3.0 sm_86 2026-06-01: 192K balanced ceiling (tensor-split 0.55,0.45 → ~21.4/21.9 GB; 262K OOMs — Gemma full-attn layers grow KV). High-fidelity Q8 sibling of beellama/gemma-dflash-dual (q4ks). Earlier 'v0.3.0-wide DFlash-on-PROSE regression' RETRACTED (2026-06-03) — didn't reproduce on qwen single+dual or gemma single; was an AR over-read + wrong baseline. This gemma-Q8-dual not separately re-benched. Promote on a STABLE tag.",
     ),
 
+    "beellama/artemis-dual-dflash": _entry(
+        model="gemma-4-31b", weights_variant="artemis-q4km-dflash", workload="fast-chat",
+        engine="beellama-local", drafter="anbeeld-gemma-dflash", kv_format="q5_0",
+        tp=2, max_ctx=131072, max_num_seqs=1, mem_util=None,
+        compose_path="models/gemma-4-31b/beellama/compose/dual/artemis-q4km-dflash/dflash.yml",
+        weights_companions=("anbeeld-dflash-iq4xs",),
+        default_port=8037,
+        kvcalc_key="SKIP",
+        status="experimental",
+        status_note="Artemis-31B-v1m (BeaverAI uncensored fine-tune of Gemma-4-31B) Q4_K_M GGUF + DFlash, dual 3090 layer-split. Same architecture/Draft as gemma-dflash-dual — DFlash draft cross-compatible. Not yet validated (preset, local-only). Boot with --force.",
+    ),
+
     # Gemma 4 26B-A4B MoE — AWQ on vLLM v0.22.0. AWQ-4bit (compressed-tensors) MoE
     # experts resolve to Marlin WNA16 MoE on Ampere sm_86; the AutoRound INT4-mixed
     # variant is Ampere-dead (uint8b128, no W4A16 kernel) and was archived.
