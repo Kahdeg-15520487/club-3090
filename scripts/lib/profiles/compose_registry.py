@@ -898,6 +898,17 @@ COMPOSE_REGISTRY = {
         status="incubating",
         status_note="NEW MODEL, UNVALIDATED — authored from an HF-config-only source pass (no real dual-RTX-3090 Linux hardware available this session). bf16-only (Intel AutoRound / cyankiwi AWQ haven't released E4B quants yet, confirmed via authenticated HF API 404s); ~7.45 GB/card weights at TP=2 leave large headroom. Sized for 8 CONCURRENT STREAMS @ 65536 ctx each (hand-derived KV math in the compose header — kv-calc.py doesn't model this spec's untied KV; k_v_tensors=2 vs the family's usual tied k_v_tensors=1). MTP drafter (google/gemma-4-E4B-it-assistant) exists but is shipped disabled — same family-wide Gemma-4 MTP x tool-calling bug blocking gemma-31b-dual. Needs: boot + verify-full + verify-stress + bench + soak + calibration (docs/ADDING_MODELS.md Steps 5-8) before promoting past incubating.",
     ),
+    "beellama/gemma-e4b-dual-q4_0": _entry(
+        model="gemma-4-e4b", weights_variant="beellama-q4_0", workload="fast-chat",
+        engine="beellama-local", drafter=None, kv_format="q8_0",
+        tp=2, max_ctx=131072, max_num_seqs=1, mem_util=None,
+        compose_path="models/gemma-4-e4b/beellama/compose/dual/q4_0/base.yml",
+        default_port=8201,
+        kvcalc_key="SKIP",
+        status="incubating",
+        status_note="Gemma-4-E4B-it Q4_0 GGUF (google QAT quant, ~4.5 GB), beellama dual layer-split, q8_0 KV, 131K ctx. Tiny weights leave huge VRAM headroom for context. No spec-dec (no compatible DFlash draft yet). Boot with --force.",
+    ),
+
 
     "vllm/diffusiongemma-dual": _entry(
         model="diffusiongemma-26b-a4b", weights_variant="fp8", workload="fast-chat", chat_template="gemma-canonical",
