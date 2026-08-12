@@ -156,6 +156,19 @@ weights:
     kind: gguf
     verify_glob: "*.gguf"
 
+  gembrain-q4km:
+    path: gembrain-x-31b-gguf
+    local_subdir: gembrain-x-31b-gguf
+    size_gb: 18.0
+    format: gguf
+    status: experimental
+    hf_repo: Nimbz/Gemma-4-Gembrain-X-31B-GGUF
+    files:
+      - imatrix/Gembrain-X-31B-Q4_K_M-imatrix.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+
     verify_glob: "*.gguf"
 default_weight_variant: autoround-int4
 compatible_drafters:

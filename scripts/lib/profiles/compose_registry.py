@@ -855,6 +855,17 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="Artemis-31B-v1m (BeaverAI uncensored fine-tune of Gemma-4-31B) Q4_K_M GGUF + DFlash, dual 3090 layer-split. Same architecture/Draft as gemma-dflash-dual — DFlash draft cross-compatible. Not yet validated (preset, local-only). Boot with --force.",
     ),
+    "beellama/gembrain-x-dual-q4km": _entry(
+        model="gemma-4-31b", weights_variant="gembrain-q4km", workload="fast-chat",
+        engine="beellama-local", drafter=None, kv_format="q5_0",
+        tp=2, max_ctx=131072, max_num_seqs=1, mem_util=None,
+        compose_path="models/gemma-4-31b/beellama/compose/dual/gembrain-q4km/base.yml",
+        default_port=8202,
+        kvcalc_key="SKIP",
+        status="incubating",
+        status_note="Gembrain-X-31B (Nimbz merge of 12+ Gemma-4-31B RP/creative fine-tunes) Q4_K_M GGUF, beellama dual layer-split, 131K ctx. Uncensored, strong reasoning + creative writing. Boot with --force.",
+    ),
+
 
     # Gemma 4 26B-A4B MoE — AWQ on vLLM v0.22.0. AWQ-4bit (compressed-tensors) MoE
     # experts resolve to Marlin WNA16 MoE on Ampere sm_86; the AutoRound INT4-mixed
