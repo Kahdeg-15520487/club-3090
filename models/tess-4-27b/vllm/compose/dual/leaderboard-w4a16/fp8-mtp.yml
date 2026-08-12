@@ -4,12 +4,18 @@
 #              weights + mtp.fc@BF16 + linear_attn.in_proj@BF16 via
 #              extra_config; ~18 GB. Native Marlin WNA16 on Ampere)
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
-#   Drafter:   MTP n=5 built-in (SPEC_N override) — the WORKING head. The
+#   Drafter:   MTP n=3 built-in (SPEC_N override) — the WORKING head. The
 #              NVFP4 sibling's 0% accept was the EXPORT (4-bit'd mtp.fc),
-#              not the head — settled 2026-07-17, club #662. n-sweep knee at
-#              n=5: prose break-even, code +49%; n=6/8 regress (tail accept
-#              collapses). DFlash alternative is upstream-blocked on this
-#              hybrid family (vllm#40898 — mixed layer_types).
+#              not the head — settled 2026-07-17, club #662.
+#              ⚠️ DEFAULT LOWERED 5 -> 3 on 2026-07-31, PRECAUTIONARY: the
+#              architecturally-identical ThinkingCap (same qwen35-dense family,
+#              same mtp.fc@BF16 head) crashes the engine at n>=4 on 3 rigs
+#              (#758). Tess has NO reported crashes — this is prophylactic, not
+#              evidence of a Tess fault. n-sweep knee WAS n=5 (prose break-even,
+#              code +49%; n=6/8 regress); the TPS numbers below are n=5-measured
+#              and n=3 is unbenched here. SPEC_N=5 restores the benched config.
+#              DFlash alternative is upstream-blocked on this hybrid family
+#              (vllm#40898 — mixed layer_types).
 #   KV:        fp8_e4m3 (validated); prefix caching ON by default (#736 —
 #              vllm#48375 vendored; Tess is a qwen3_5 HYBRID, 48 linear + 16
 #              full attention; hybrid prefix caching via mamba align mode)
@@ -22,6 +28,18 @@
 #              116/150, cli-40-concentrated 19/40 vs 25/40); think-ON ties
 #              (115 vs 117, within ±5-7 noise, cli-40 25/40 = parity). Same
 #              precision-not-serving-path gap as the NVFP4 A0 arms.
+#              • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — SPEC_N=0. Lower n cuts
+#                frequency, NOT exposure (#758 called n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
 #   Quality:   core 8-pack 108/150 (72%) think-off · 115/150 (77%) think-on
 #              (benchlocal --full, rebench tess-4-27b-20260717-0529) — BEATS
 #              the NVFP4 A0 baseline (106/113) on both legs.
@@ -98,6 +116,10 @@ services:
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - NVLINK_MODE=${NVLINK_MODE:-auto}
+      # Opt-in transfer check: VLLM_SKIP_P2P_CHECK=0 makes vLLM PROVE peer access by
+      # moving bytes (report.sh reads the cache). Bare passthrough — absent unless set.
+      # docs/PCIE_P2P.md §7.
+      - VLLM_SKIP_P2P_CHECK
       - NCCL_CUMEM_ENABLE=0
       # Safe PCIe default (mirrors the validated dual composes); rigs with
       # working P2P set NCCL_P2P_DISABLE=0.
@@ -171,10 +193,11 @@ services:
       - --tool-call-parser
       - qwen3_coder
       # The revived built-in MTP head (BF16-preserved in this checkpoint).
-      # n=5 = the measured knee; n=6/8 REGRESS (see header). SPEC_N=0 is NOT
+      # n=5 WAS the measured knee, but the default is now 3 — see the
+      # precautionary #758 note in the header. n=6/8 REGRESS. SPEC_N=0 is NOT
       # supported here — comment the block out to run spec-off.
       - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":${SPEC_N:-5}}'
+      - '{"method":"mtp","num_speculative_tokens":${SPEC_N:-3}}'
       - --override-generation-config
       - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
       - --host

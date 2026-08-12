@@ -17,10 +17,28 @@
 #   Vision:    yes (image only)
 #   Max ctx:   262K (kv-calc: 15.7 GB/card on 2× 32 GB @ util 0.92 — 53% of
 #              budget; ~11.7 GB/card weights, MoE KV is tiny)
+#              ⤷ NOT derated alongside the 27B dense sibling (2026-08-01, #838).
+#                That slug's 262K envelope was cut to util 0.85 + batched 2048
+#                after a 2× 5090 boot OOMed in the GDN prefill scratch. This one
+#                is deliberately left alone, for two reasons worth stating so a
+#                future reader doesn't assume it was overlooked: (a) it ships NO
+#                MTP drafter, so no draft head + no spec-path GDN pass — the two
+#                things that ate the dense slug's headroom; (b) it sits at 53% of
+#                budget vs the dense slug's blind 75%. If a 2× 32 GB boot of THIS
+#                compose OOMs in `chunk_gated_delta_rule_fwd_h`, apply the same
+#                two knobs and say so — the batched-token term (docs/KV_MATH.md
+#                → "GDN chunked-prefill scratch") applies to every GDN model.
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    🧪 Experimental
-#   Best for:  full-ctx fast MoE on Blackwell/Hopper pairs — pending first
-#              community validation
+#   Best for:  ⭐ full-ctx fast MoE on Blackwell/Hopper pairs — 274.1 / 274.6
+#              decode TPS at 262K on 2× 5090 (#858), +8.8% over the AutoRound
+#              sibling on the same rig, same day, at wash-level quality
+#              ⤷ VALIDATED 2026-08-02 (#858 @paulp83) — this was the LAST
+#                unvalidated slug in the NVFP4 arc. verify-full + verify-stress
+#                6/6 to 240K (91%), soak PASS, 8-pack 110 off / 120 on.
+#                Status stays 🧪 on one rig: the single sibling needed TWO
+#                independent validations before promotion, so a second 32 GB
+#                pair is the trigger here.
 # ---------------------------------------------------------------------------
 # ⚠️ AUTHORED BLIND — READ THIS FIRST.
 # NVFP4 runs on the maintainer rig (2× RTX 3090 sm_86) via the Marlin W4A16
@@ -97,6 +115,10 @@ services:
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
       - NVLINK_MODE=${NVLINK_MODE:-auto}
+      # Opt-in transfer check: VLLM_SKIP_P2P_CHECK=0 makes vLLM PROVE peer access by
+      # moving bytes (report.sh reads the cache). Bare passthrough — absent unless set.
+      # docs/PCIE_P2P.md §7.
+      - VLLM_SKIP_P2P_CHECK
       - NCCL_CUMEM_ENABLE=0
       # Safe PCIe default (mirrors the validated dual composes); rigs with
       # working P2P set NCCL_P2P_DISABLE=0.

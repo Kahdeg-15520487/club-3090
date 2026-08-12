@@ -77,13 +77,15 @@ These are cross-cutting references both tracks reach for.
 | Doc | What it is |
 |---|---|
 | **`scripts/switch.sh --list`** *(runtime command, not a doc)* | **The authoritative compose × slug matrix.** Registry-derived from `scripts/lib/profiles/compose_registry.py`, so it's always current — every launchable slug with its topology, model, engine, KV format, and max ctx. Run this rather than trusting any hand-maintained table; the static lists in the per-topology docs are illustrative, this is the source of truth. |
-| [`engines/`](engines/) | Per-engine deep dives — [vLLM](engines/VLLM.md), [llama.cpp](engines/LLAMA_CPP.md), [SGLang](engines/SGLANG.md). |
+| [`engines/`](engines/) | Per-engine deep dives — [vLLM](engines/VLLM.md), [llama.cpp](engines/LLAMA_CPP.md), [ik_llama](engines/IK_LLAMA.md), [SGLang](engines/SGLANG.md), [llamacpp-club3090](engines/LLAMACPP_CLUB3090.md) 🧪 (MoE expert cache — @leloch's, unmerged upstream). |
 | [`INFERENCE_ENGINES.md`](INFERENCE_ENGINES.md) | Engine picker — which engine for which workload, and structural gaps. |
 | [`CLIFFS.md`](CLIFFS.md) | The accumulated-context / prefill failure modes (Cliff 2, Cliff 2b) and how to detect them. |
 | [`QUANTIZATION.md`](QUANTIZATION.md) | **Quant field guide** — GGUF ladder, the vLLM/safetensors schemes, KLD-by-fidelity (§4a), and the **fast/balanced/max tier trade-space** (§4b). The conceptual home the dtype/kernel matrices support. |
 | [`DTYPE_MATRIX.md`](DTYPE_MATRIX.md) | Supported dtype × model × engine matrix. |
 | [`KERNEL_MATRIX.md`](KERNEL_MATRIX.md) | Quant-kernel availability and alignment constraints. |
 | [`QUALITY_TEST.md`](QUALITY_TEST.md) | The quality-test harness and what it measures. |
+| [`OFFLOAD_MATRIX.md`](OFFLOAD_MATRIX.md) | Sweeping **CPU-offloaded MoE** serving configs (llama.cpp forks only) — the 8 dimensions, the order to tune them in, and the traps that produce plausible wrong numbers. |
+| [`BENCH_CARD.md`](BENCH_CARD.md) | The per-run `bench.sh` card — Snapshot (first numbers) and A/B (config change) templates, with the integrity checklist that catches plausible-but-wrong measurements. Also: which card fields `bench.sh` now auto-fills, and its capture knobs (`SERVER_LOG`, `ENDPOINT`, `STREAM_CALIB`). |
 | [`RESULTS_CARD.md`](RESULTS_CARD.md) | The standard 3-panel format (Serving · Quality · Takeaways) for sharing a config's measured results. |
 | [`ANNOUNCEMENT_TEMPLATE.md`](ANNOUNCEMENT_TEMPLATE.md) | The "we shipped X" Announcements-post skeleton that wraps a Results Card (intro+credits · Results Card · getting it · run it · credits). |
 | [`STRUCTURED_COT.md`](STRUCTURED_COT.md) | The bounded-thinking / structured-CoT compose path. |

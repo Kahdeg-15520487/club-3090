@@ -13,7 +13,9 @@ script calls.  Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -73,6 +75,7 @@ from club3090_cockpit.data import (
 from club3090_cockpit.services import CockpitData, RealRunner, RunResult, _variant_row_from_dict
 
 
+_REAL_RUN = RealRunner.run
 ROOT = Path("/tmp/fake-club-3090-root")
 
 
@@ -1043,6 +1046,327 @@ class TestByoCheck:
         res = await cd.byo_check("org/Model", "vllm/dual")
         assert res.error
 
+    # ── GGUF redirect: the safetensors evaluate leg on a GGUF-only repo ──────
+    UNSUPPORTED_JSON = (
+        '{"arch": null, "eligible": false, "fit_verdict": "unsupported-format",'
+        ' "note": "unsupported-format: org/Model-GGUF (no config.json)",'
+        ' "swap_path": {"drop_spec_config": false, "quant_match": null,'
+        ' "route": null, "sibling_slug": null}}'
+    )
+    GGUF_INV_JSON = (
+        '{"formats": ["gguf"], "safetensors": null, "gguf_variants":'
+        ' [{"quant": "Q4_K_M", "size_gb": 16.8, "parts": 1, "files": ["a.gguf"]},'
+        '  {"quant": "MTP-IQ4_XS", "size_gb": 15.9, "parts": 1, "files": ["b.gguf"]}]}'
+    )
+
+    @pytest.mark.asyncio
+    async def test_byo_gguf_only_redirects_to_quant_picker(self):
+        """unsupported-format + GGUF-only inventory -> gguf-pick-quant, not a
+        dead-end (the 2026-07-27 community-triage class)."""
+        runner = full_runner(**{
+            "pull.sh": ok(self.UNSUPPORTED_JSON),
+            "--inventory": ok(self.GGUF_INV_JSON),
+        })
+        cd = CockpitData(ROOT, runner=runner)
+        res = await cd.byo_check("org/Model-GGUF", "llamacpp/deckard40B-dual-mtp")
+        assert res.fit_verdict == "gguf-pick-quant"
+        assert res.arch == "gguf"
+        assert res.eligible is False
+        assert not res.error
+        assert "2 quant(s)" in res.note
+        assert "llamacpp/deckard40B-dual-mtp" in res.note
+
+    @pytest.mark.asyncio
+    async def test_byo_gguf_only_safetensors_profile_suggests_gguf_engines(self):
+        runner = full_runner(**{
+            "pull.sh": ok(self.UNSUPPORTED_JSON),
+            "--inventory": ok(self.GGUF_INV_JSON),
+        })
+        cd = CockpitData(ROOT, runner=runner)
+        res = await cd.byo_check("org/Model-GGUF", "vllm/dual")
+        assert res.fit_verdict == "gguf-pick-quant"
+        assert "safetensors engine" in res.note
+        assert "llamacpp" in res.note
+
+    @pytest.mark.asyncio
+    async def test_byo_unsupported_format_non_gguf_passes_through(self):
+        """A genuinely unsupported repo (no GGUF either) keeps the original
+        verdict — the intercept must not swallow it."""
+        runner = full_runner(**{
+            "pull.sh": ok(self.UNSUPPORTED_JSON),
+            "--inventory": ok('{"formats": [], "safetensors": null, "gguf_variants": []}'),
+        })
+        cd = CockpitData(ROOT, runner=runner)
+        res = await cd.byo_check("org/NotAModel", "vllm/dual")
+        assert res.fit_verdict == "unsupported-format"
+
+    @pytest.mark.asyncio
+    async def test_byo_unsupported_format_inventory_error_passes_through(self):
+        """Inventory fetch failure -> keep the original verdict (never crash
+        the fit-check on the redirect's own probe)."""
+        runner = full_runner(**{
+            "pull.sh": ok(self.UNSUPPORTED_JSON),
+            "--inventory": ok(""),
+        })
+        cd = CockpitData(ROOT, runner=runner)
+        res = await cd.byo_check("org/Model-GGUF", "llamacpp/deckard40B-dual-mtp")
+        assert res.fit_verdict == "unsupported-format"
+
+    # ── Download logs + preflight (2026-07-27 triage fixes) ──────────────────
+
+    @staticmethod
+    def _dl_capture():
+        import asyncio as _a
+
+        class _CaptureDL:
+            def __init__(self):
+                self.calls = []
+                self.cbs = {}
+
+            def set_callbacks(self, **kw):
+                self.cbs = kw
+
+            async def start_raw(self, cmd, env=None, run_type=None, parser=None):
+                self.calls.append(list(cmd))
+                h = type("H", (), {})()
+                h.done = _a.Event()
+                h.done.set()
+                h.exit_code = 0
+                return h
+
+        return _CaptureDL()
+
+    @pytest.mark.asyncio
+    async def test_download_log_written_and_announced(self, tmp_path, monkeypatch):
+        """Every weights download tees to <config>/logs/ and announces the path
+        as the pane's first line (the "no logs for c3" fix)."""
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        cap = self._dl_capture()
+        lines: list[str] = []
+        cd = CockpitData(ROOT, runner=full_runner(), download_runner=cap)
+        await cd.run_weights_download("qwen3.6-27b", "autoround-int4", on_line=lines.append)
+        logs = list((tmp_path / "logs").glob("c3-download-*weights-qwen3.6-27b*.log"))
+        assert len(logs) == 1
+        text = logs[0].read_text(encoding="utf-8")
+        assert "# cmd: bash scripts/setup.sh qwen3.6-27b" in text
+        assert lines and lines[0].startswith("[log] ")
+        assert cap.calls  # preflight skipped suite-wide -> spawn reached
+
+    @pytest.mark.asyncio
+    async def test_preflight_blocks_weights_download_without_hf_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("C3_SKIP_DOWNLOAD_PREFLIGHT", raising=False)
+        monkeypatch.setattr(CockpitData, "_hf_cli_present", lambda self: False)
+        cap = self._dl_capture()
+        lines: list[str] = []
+        cd = CockpitData(ROOT, runner=full_runner(), download_runner=cap)
+        st = await cd.run_weights_download("qwen3.6-27b", "autoround-int4", on_line=lines.append)
+        assert not cap.calls, "must not spawn on a preflight blocker"
+        assert st.verdict == "failed"
+        assert "hf" in st.error
+        joined = "\n".join(lines)
+        assert "setup.sh" in joined and "pipx install" in joined
+        text = next((tmp_path / "logs").glob("c3-download-*.log")).read_text(encoding="utf-8")
+        assert "preflight" in text and "# done" in text
+
+    @pytest.mark.asyncio
+    async def test_preflight_blocks_bring_download_too(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("C3_SKIP_DOWNLOAD_PREFLIGHT", raising=False)
+        monkeypatch.setattr(CockpitData, "_hf_cli_present", lambda self: False)
+        cap = self._dl_capture()
+        cd = CockpitData(ROOT, runner=full_runner(), download_runner=cap)
+        st = await cd.run_bring_download("org/Model-GGUF", "llamacpp/deckard40B-dual-mtp")
+        assert not cap.calls
+        assert st.verdict == "failed"
+
+    @pytest.mark.asyncio
+    async def test_preflight_token_note_never_blocks(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3_SKIP_DOWNLOAD_PREFLIGHT", raising=False)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.setattr(CockpitData, "_hf_cli_present", lambda self: True)
+        monkeypatch.setattr(
+            CockpitData, "_hf_token_file", lambda self: tmp_path / "absent-token"
+        )
+        cd = CockpitData(ROOT, runner=full_runner(), download_runner=self._dl_capture())
+        blockers, notes = cd.download_preflight()
+        assert not blockers
+        assert any("401" in n for n in notes)
+
+    def test_download_log_prune_keeps_newest(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        from club3090_cockpit.services import DownloadLog
+
+        d = tmp_path / "logs"
+        d.mkdir()
+        for i in range(35):
+            f = d / f"c3-download-old{i:03d}-x.log"
+            f.write_text("x", encoding="utf-8")
+            os.utime(f, (1000 + i, 1000 + i))
+        DownloadLog("prune-test", ["true"])
+        remaining = list(d.glob("c3-download-*.log"))
+        assert len(remaining) == DownloadLog.KEEP
+        assert any("prune-test" in p.name for p in remaining)  # newest survives
+
+    @pytest.mark.asyncio
+    async def test_master_logging_defaults_off_for_write_runner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+
+        class WriteRunner:
+            async def start_raw(self, cmd, env, run_type, parser):
+                return CoreRunState(run_type=run_type, started=time.time())
+
+        cd = CockpitData(ROOT, runner=full_runner(), write_runner=WriteRunner())
+        await cd._start_raw_logged(
+            cd._write_runner,
+            ["bash", "scripts/verify.sh"],
+            env={"HF_TOKEN": "hf_must_not_leak"},
+            run_type="verify",
+            parser=object(),
+        )
+        assert not list((tmp_path / "logs").glob("c3-run-*.log"))
+
+    @pytest.mark.asyncio
+    async def test_write_runner_log_stream_footer_and_env_redaction(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+
+        class WriteRunner:
+            def __init__(self):
+                self.callbacks = {}
+
+            def set_callbacks(self, **callbacks):
+                self.callbacks = callbacks
+
+            async def start_raw(self, cmd, env, run_type, parser):
+                self.callbacks["on_line"]("streamed line")
+                state = CoreRunState(
+                    run_type=run_type,
+                    started=time.time(),
+                    finished=time.time(),
+                    exit_code=0,
+                    verdict="passed",
+                )
+                state.done.set()
+                self.callbacks["on_complete"](state)
+                return state
+
+        writer = WriteRunner()
+        cd = CockpitData(ROOT, runner=full_runner(), write_runner=writer)
+        cd.set_logging_enabled(True)
+        await cd._start_raw_logged(
+            writer,
+            ["bash", "scripts/verify.sh"],
+            env={"HF_TOKEN": "hf_must_not_leak"},
+            run_type="verify",
+            parser=object(),
+        )
+        assert all(callback is None for callback in writer.callbacks.values())
+        log = next((tmp_path / "logs").glob("c3-run-*-verify.log"))
+        text = log.read_text(encoding="utf-8")
+        assert "# cmd: bash scripts/verify.sh" in text
+        assert "streamed line" in text
+        assert "# done · exit=0 · verdict=passed" in text
+        assert "hf_must_not_leak" not in text
+        assert "HF_TOKEN" not in text
+
+    @pytest.mark.asyncio
+    async def test_read_runner_logs_failure_but_omits_healthy_poll_output(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+
+        class Proc:
+            def __init__(self, rc, out, err):
+                self.returncode = rc
+                self._out = out
+                self._err = err
+
+            async def communicate(self):
+                return self._out.encode(), self._err.encode()
+
+        responses = iter([
+            Proc(0, '{"large": [1, 2, 3]}', ""),
+            Proc(
+                0,
+                "Filesystem 1K-blocks Used Available Use% Mounted on\n"
+                "/dev/root 1 1 0 100% /\n",
+                "",
+            ),
+            Proc(2, "partial output", "parse failed"),
+        ])
+
+        async def fake_exec(*args, **kwargs):
+            return next(responses)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        runner = RealRunner(logging_enabled=True)
+        healthy_json = await _REAL_RUN(runner, ["bash", "registry-emit"], cwd="/tmp")
+        healthy_text = await _REAL_RUN(runner, ["df", "-P"], cwd="/tmp")
+        failed = await _REAL_RUN(runner, ["bash", "kv-calc"], cwd="/tmp")
+        assert healthy_json.ok and healthy_text.ok and not failed.ok
+        logs = list((tmp_path / "logs").glob("c3-read-*-read.log"))
+        assert len(logs) == 3
+        assert not list((tmp_path / "logs").glob("c3-run-*-read.log"))
+        texts = [path.read_text(encoding="utf-8") for path in logs]
+        healthy_json_log = next(text for text in texts if "registry-emit" in text)
+        healthy_text_log = next(text for text in texts if "# cmd: df -P" in text)
+        failed_text = next(text for text in texts if "kv-calc" in text)
+        assert '"large"' not in healthy_json_log
+        assert "# done · exit=0 · verdict=passed" in healthy_json_log
+        assert "Filesystem" not in healthy_text_log
+        assert "/dev/root" not in healthy_text_log
+        assert "# done · exit=0 · verdict=passed" in healthy_text_log
+        assert "partial output" in failed_text
+        assert "parse failed" in failed_text
+        assert "# done · exit=2 · verdict=failed" in failed_text
+
+    def test_read_churn_cannot_prune_write_logs(self, tmp_path, monkeypatch):
+        from club3090_cockpit.services import ReadLog, RunLog
+
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        write_log = RunLog(
+            "serve", ["bash", "scripts/switch.sh", "vllm/default"]
+        )
+        write_path = write_log.path
+        write_log.complete_result(RunResult(1, "boot output", "serve crashed"))
+
+        for i in range(ReadLog.KEEP + 5):
+            read_log = ReadLog(["poll", str(i)])
+            read_log.complete_result(RunResult(0, f"healthy poll dump {i}", ""))
+
+        assert write_path is not None and write_path.exists()
+        assert "serve crashed" in write_path.read_text(encoding="utf-8")
+        read_logs = list((tmp_path / "logs").glob("c3-read-*.log"))
+        assert len(read_logs) == ReadLog.KEEP
+        assert not any(
+            "healthy poll dump" in path.read_text(encoding="utf-8")
+            for path in read_logs
+        )
+
+    def test_session_log_prune_keeps_ten(self, tmp_path, monkeypatch):
+        from club3090_cockpit.session_logging import SessionLog
+
+        monkeypatch.setenv("C3_CONFIG_DIR", str(tmp_path))
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        for i in range(12):
+            path = log_dir / f"c3-session-old{i:03d}.log"
+            path.write_text("old", encoding="utf-8")
+            os.utime(path, (1000 + i, 1000 + i))
+        session = SessionLog()
+        session.close()
+        remaining = list(log_dir.glob("c3-session-*.log"))
+        assert len(remaining) == SessionLog.KEEP
+        assert session.path in remaining
+
+    def test_profile_like_is_gguf_engine(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        assert cd.profile_like_is_gguf_engine("llamacpp/deckard40B-dual-mtp")
+        assert cd.profile_like_is_gguf_engine("ik-llama/iq4ks-mtp")
+        assert cd.profile_like_is_gguf_engine("beellama/dflash")
+        assert not cd.profile_like_is_gguf_engine("vllm/dual")
+        assert not cd.profile_like_is_gguf_engine("")
+
 
 class TestScenesDoctor:
     @pytest.mark.asyncio
@@ -1421,7 +1745,8 @@ class TestServiceStart:
         assert plan.cmd == [
             "docker", "compose", "-f",
             "services/litellm/docker-compose.yml", "-p", "litellm", "up", "-d"]
-        assert plan.requires_reconcile is True
+        # litellm is a non-GPU web service → skips the reconcile gate
+        assert plan.requires_reconcile is False
         assert plan.kind == "service-up"
 
     def test_env_file_included_when_present(self, tmp_path):
@@ -1437,6 +1762,12 @@ class TestServiceStart:
         (d / "docker-compose.yaml").write_text("services: {}\n")
         plan = CockpitData(tmp_path).service_start("x")
         assert "services/x/docker-compose.yaml" in plan.cmd
+
+    def test_gpu_service_requires_reconcile(self, tmp_path):
+        """comfyui is a GPU holder → reconcile is required."""
+        _seed_service_dirs(tmp_path, ["comfyui"])
+        plan = CockpitData(tmp_path).service_start("comfyui")
+        assert plan.requires_reconcile is True
 
 
 class TestComfyuiImagePresent:
@@ -3780,13 +4111,35 @@ class TestServeOverrides:
         assert d["ENGINE"] == "vllm-stable"              # only parsing gives this
         assert d["SPEC_DRAFTER"] == "MTP n=3"            # real drafter, not "on"
 
+    def test_every_registry_drafter_has_a_spec_token(self):
+        """No shipped drafter may fall through to the generic "spec" fallback.
+
+        _spec_token() pattern-matches the drafter id, so a NEW method (dspark was the
+        case) renders as the literal string "spec" in the catalog — technically not
+        wrong, but it tells the user nothing and looks like a bug. Catch it here rather
+        than in a screenshot.
+        """
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts/lib/profiles"))
+        from compose_registry import COMPOSE_REGISTRY
+        from club3090_cockpit.app import _spec_token
+
+        generic = sorted({
+            (e.get("drafter") or "")
+            for e in COMPOSE_REGISTRY.values()
+            if (e.get("drafter") or "") and _spec_token(e.get("drafter")) == "spec"
+        })
+        assert not generic, f"drafters with no _spec_token mapping: {generic}"
+
     def test_engine_kv_formats_is_engine_specific(self):
         repo_root = Path(__file__).resolve().parents[3]
         cd = CockpitData(repo_root, runner=full_runner())
         vk = cd.engine_kv_formats("vllm-stable")
         assert "fp8_e5m2" in vk and "int8_per_token_head" in vk
         # a totally different engine → a totally different KV family
-        assert cd.engine_kv_formats("llama-cpp-mainline") == ["q4_0", "q5_0", "q8_0", "k8v4"]
+        # fp16 is llama.cpp's default KV (no -ctk/-ctv); added to the engine profile in
+        # #905 for the DeepSeek-Flash CPU-offload slugs, which serve on it.
+        assert cd.engine_kv_formats("llama-cpp-mainline") == ["fp16", "q4_0", "q5_0", "q8_0", "k8v4"]
         # the editor's KV options come from the engine, not a generic list
         assert cd.serve_override_defaults("vllm/dual", "org/Foo")["KV_OPTIONS"] == vk
 
@@ -3801,11 +4154,18 @@ class TestServeOverrides:
 
 
 class TestBringGgufDownload:
-    """route-G [D]: a GGUF bring must fetch the picked quant's files directly (hf
-    download --include), NOT pull.sh — pull.sh aborts unsupported-format on a GGUF
-    repo (no config.json).  (2026-07-09 dogfood.)"""
+    """route-G [D]: a GGUF bring must fetch the picked quant's files directly
+    (--include), NOT pull.sh — pull.sh aborts unsupported-format on a GGUF repo
+    (no config.json).  (2026-07-09 dogfood.)
 
-    def test_gguf_includes_build_hf_download_cmd(self, tmp_path):
+    #804: and it must go through the hf_fetch module CLI, not a bare
+    `hf download`.  huggingface_hub client-side REFUSES the classic path above a
+    hard-coded 50 GB ceiling; a large monolithic GGUF is precisely the file that
+    trips it, and this funnel is precisely the path such files take.  The module
+    CLI carries the resilience ladder (classic LFS -> opt-in Xet -> re-resolved
+    raw curl) with a mandatory sha256 gate on every rung."""
+
+    def test_gguf_includes_build_hf_fetch_cmd(self, tmp_path):
         import asyncio
         d = CockpitData(tmp_path)
         cap = {}
@@ -3820,9 +4180,16 @@ class TestBringGgufDownload:
             "org/Repo-GGUF", "llamacpp/default",
             gguf_includes=["org_Repo-Q8_0.gguf", "mmproj-f16.gguf"]))
         c = cap["cmd"]
-        assert c[1] == "download" and "pull.sh" not in " ".join(c)     # hf download, not pull.sh
+        joined = " ".join(c)
+        assert "pull.sh" not in joined                                 # not the safetensors path
+        # The ladder, not a bare `hf download` — the whole point of the repoint.
+        assert c[:2] == ["python3", "scripts/lib/profiles/hf_fetch.py"], c
+        assert "download" not in c, "a bare `hf download` argv would re-inherit the 50 GB wall"
+        assert c[2] == "org/Repo-GGUF"
         assert "--local-dir" in c and str(d.bring_pull_dir("org/Repo-GGUF")) in c
         assert c.count("--include") == 2
+        # A re-run must adopt an already-correct 96 GB file, not re-pull it.
+        assert "--verify-in-place" in c
         assert cap["env"].get("HF_HUB_DISABLE_XET") == "1"             # resumable classic LFS
 
     def test_no_gguf_includes_uses_pull_sh(self, tmp_path):

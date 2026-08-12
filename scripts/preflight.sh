@@ -262,7 +262,7 @@ _preflight_hardware_suggestions() {
   echo "[preflight]   - Pick a compose that matches the detected GPU VRAM/topology." >&2
   if [[ "$variant" == vllm/gemma-mtp-tp1 ]]; then
     echo "[preflight]   - vllm/gemma-mtp-tp1 is DEPRECATED (no fp8 KV path for Gemma 4 on Ampere sm_86)." >&2
-    echo "[preflight]   - Single 24 GB card, use:  bash scripts/switch.sh beellama/gemma-dflash" >&2
+    echo "[preflight]   - Single 24 GB card: no functional Gemma-4-31B single config (beellama retired 2026-07-27) — nearest: bash scripts/switch.sh vllm/gemma-12b-single-int8-mtp (12B), or run the 31B dual" >&2
     echo "[preflight]   - On 2x 24 GB cards, use:  bash scripts/switch.sh vllm/gemma-31b-dual" >&2
   fi
   echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh beellama/dflash  (single-card default)" >&2
@@ -886,6 +886,67 @@ _preflight_compose_model_dir() {
   printf '%s' "$model_dir"
 }
 
+# _preflight_compose_flag_paths <flag-alternation> <compose-file>... — emit every
+# `/models/...` value passed to one of the given flags, in BOTH compose spellings.
+#
+# ⚠️ Compose command args come in two forms, and matching only one is a SILENT
+# hole — the guard returns green for a compose it never actually read:
+#
+#     command: -m /models/x.gguf          # inline: flag + value on one line
+#     command:                            # list: flag and value are SEPARATE items
+#       - '-m'
+#       - '/models/x.gguf'
+#
+# Every extractor here was inline-only, so all three DeepSeek-Flash composes
+# (list form) were invisible: the path came back empty, the qwen fallback took
+# over, and `switch.sh` validated *Qwen's* files while launching DeepSeek. That
+# is how paulp83 got three container restarts and a cryptic in-container
+# "failed to open GGUF file" instead of one clear "weights missing" (#913).
+# _preflight_escapes_mount <mount_root> <file> — true when <file> is reachable on
+# the HOST only by following a symlink out of <mount_root>.
+#
+# ⚠️ THE HOST AND THE CONTAINER DISAGREE, AND THE HOST IS THE OPTIMISTIC ONE.
+# `[[ -f ]]` follows symlinks, so a model dir symlinked onto another disk reads as
+# PRESENT here — while a Docker bind mount does NOT follow links that leave the
+# mounted tree, so the container gets "No such file or directory" and the server
+# exits. Preflight then looks like it passed and the failure surfaces as a cryptic
+# in-container error, which is exactly the confusion this guard exists to prevent.
+#
+# Not exotic: these weights are 85-151 GB, so the users most likely to run them are
+# the ones whose model disk filled up and who symlinked a model dir elsewhere. This
+# rig does precisely that, and it is how the trap was found (2026-08-07).
+_preflight_escapes_mount() {
+  local root="$1" file="$2" rroot rfile
+  command -v realpath >/dev/null 2>&1 || return 1     # cannot tell -> do not cry wolf
+  rroot="$(realpath -m "$root" 2>/dev/null)"  || return 1
+  rfile="$(realpath -m "$file" 2>/dev/null)"  || return 1
+  [[ -n "$rroot" && -n "$rfile" ]] || return 1
+  [[ "$rfile" == "$rroot"/* ]] && return 1            # stays inside the mount: fine
+  return 0                                            # escapes: container will not see it
+}
+
+_preflight_compose_flag_paths() {
+  local flags="$1"
+  shift
+  [[ $# -gt 0 ]] || return 0
+
+  # (a) inline — flag and value on the same line.
+  grep -hoE -- "(^|[[:space:]])(${flags})[[:space:]]+/models/[^[:space:]]+" "$@" 2>/dev/null \
+    | awk '{print $NF}' || true
+
+  # (b) YAML list — the value is the NEXT list item after the flag item.
+  # `q` carries the single quote so the program stays single-quotable in bash.
+  awk -v flagre="^(${flags})$" -v q="'" '
+    FNR == 1 { pending = 0 }                       # never span two files
+    {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)  # strip the list dash
+      gsub("^[\"" q "]|[\"" q "],?$", "", line)    # strip quotes / trailing comma
+      if (pending && line ~ /^\/models\//) { print line; pending = 0; next }
+      pending = (line ~ flagre) ? 1 : 0
+    }' "$@" 2>/dev/null || true
+}
+
 _preflight_compose_path_default() {
   local value="$1"
   value="$(_preflight_trim "$value")"
@@ -1110,6 +1171,7 @@ preflight_compose_deps() {
     | sed -E 's/^[[:space:]]*file:[[:space:]]*//' || true)
 
   local missing=()
+  local escaped=()
 
   # Engine detection: llama.cpp composes mount ${MODEL_DIR}:/models and pass
   # `-m /models/<path>` or `--model /models/<path>`; vLLM composes mount
@@ -1134,8 +1196,7 @@ preflight_compose_deps() {
     while IFS= read -r token; do
       path="$(_preflight_compose_path_default "$token")"
       [[ -n "$path" ]] && gguf_paths+=("$path")
-    done < <(grep -hoE -- '(^|[[:space:]])(-m|--model)[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
-      | awk '{print $NF}' || true)
+    done < <(_preflight_compose_flag_paths '-m|--model' "${compose_files[@]}")
 
     # Speculative drafter: beellama --spec-draft-model, llama.cpp -md/--model-draft.
     # A missing drafter GGUF otherwise surfaces only as a cryptic in-container
@@ -1143,14 +1204,12 @@ preflight_compose_deps() {
     while IFS= read -r token; do
       path="$(_preflight_compose_path_default "$token")"
       [[ -n "$path" ]] && draft_paths+=("$path")
-    done < <(grep -hoE -- '(^|[[:space:]])(--spec-draft-model|--model-draft|-md)[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
-      | awk '{print $NF}' || true)
+    done < <(_preflight_compose_flag_paths '--spec-draft-model|--model-draft|-md' "${compose_files[@]}")
 
     while IFS= read -r token; do
       path="$(_preflight_compose_path_default "$token")"
       [[ -n "$path" ]] && mmproj_paths+=("$path")
-    done < <(grep -hoE -- '(^|[[:space:]])--mmproj[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
-      | awk '{print $NF}' || true)
+    done < <(_preflight_compose_flag_paths '--mmproj' "${compose_files[@]}")
 
     # Env overrides mirror the compose knobs (GGUF_FILE / DRAFT_FILE / MMPROJ_FILE),
     # each replacing only its own path class.
@@ -1167,16 +1226,22 @@ preflight_compose_deps() {
     for path in "${gguf_paths[@]}"; do
       if [[ ! -f "${model_dir}/${path}" ]]; then
         missing+=("${model_dir}/${path} (llama.cpp GGUF weights)")
+      else
+        _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
       fi
     done
     for path in "${draft_paths[@]}"; do
       if [[ ! -f "${model_dir}/${path}" ]]; then
         missing+=("${model_dir}/${path} (speculative drafter GGUF)")
+      else
+        _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
       fi
     done
     for path in "${mmproj_paths[@]}"; do
       if [[ ! -f "${model_dir}/${path}" ]]; then
         missing+=("${model_dir}/${path} (vision projector)")
+      else
+        _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
       fi
     done
   else
@@ -1212,6 +1277,30 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (MODEL_DIR volume path)")
       fi
     done < <(grep -hoE '\$\{MODEL_DIR[^}]*\}/[^"[:space:]]+' "${compose_files[@]}" || true)
+  fi
+
+  # Present on the host, unreachable from the container. Reported SEPARATELY from
+  # `missing`, because the fix is completely different: the bytes are already
+  # downloaded and telling the user to fetch them again would be wrong.
+  if [[ ${#escaped[@]} -gt 0 ]]; then
+    echo "[preflight] ERROR: compose '$compose_file' points at files that exist on the host" >&2
+    echo "            but resolve OUTSIDE \$MODEL_DIR through a symlink:" >&2
+    local _e
+    for _e in "${escaped[@]}"; do
+      echo "[preflight]   ${_e}" >&2
+      echo "[preflight]     -> $(realpath -m "$_e" 2>/dev/null)" >&2
+    done
+    echo "[preflight]" >&2
+    echo "[preflight] A Docker bind mount does NOT follow symlinks that leave the mounted" >&2
+    echo "[preflight] tree, so the container sees a dangling link and the server exits with" >&2
+    echo "[preflight] \"failed to open GGUF file (No such file or directory)\". The weights" >&2
+    echo "[preflight] are fine — do NOT re-download them." >&2
+    echo "[preflight]" >&2
+    echo "[preflight] Fix (either one):" >&2
+    echo "[preflight]   MODEL_DIR=<the directory the symlink points into> bash scripts/switch.sh ..." >&2
+    echo "[preflight]   or replace the symlink with a real directory / bind mount under \$MODEL_DIR" >&2
+    echo "[preflight] Skip this check:  PREFLIGHT_NO_COMPOSE_DEPS=1 bash scripts/switch.sh ..." >&2
+    return 1
   fi
 
   if [[ ${#missing[@]} -eq 0 ]]; then
@@ -1494,4 +1583,171 @@ preflight_ik_llama_image() {
   echo "[preflight]   Auto-selected the cu12 sibling build (same build, CUDA 12.6, backward-compatible):" >&2
   echo "[preflight]     IK_LLAMA_IMAGE=${IK_LLAMA_CU12_FALLBACK}" >&2
   echo "[preflight]   Pin IK_LLAMA_IMAGE in .env to override." >&2
+}
+
+# ---------------------------------------------------------------------------
+# CPU-offload guards.
+#
+# MARKER-SCOPED, never model-scoped. Model-keyed guards rot: every new offload
+# model needs an update and the one that gets forgotten is the one that bites.
+# Keying on the offload flags means every future offload model inherits these
+# for free. Same convention as preflight_lmcache_ram(), which keys on a header.
+#
+# ⭐ Our OWN composes are correct by construction — we author and measure them.
+# The entire value of these guards is in configs we DON'T control: user edits,
+# community composes, someone adapting our pattern to a different MoE.
+# ---------------------------------------------------------------------------
+
+# is_cpu_offload_compose <compose_file>
+# True when the compose actually offloads experts to host RAM.
+#
+# ⚠️ Match `=CPU` SPECIFICALLY, not the presence of `-ot`. Our offload composes
+#    carry two-to-four `-ot` rules that are `=CUDA0`/`=CUDA1`/... RESIDENCY —
+#    GPU-side placement, the exact opposite of offload. A naive "has -ot" test
+#    false-positives on a fully GPU-resident config.
+is_cpu_offload_compose() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 1
+  # ⚠️ Must work for BOTH compose command forms. The list form puts every arg on its
+  # own line ("      - '-ot'" / "      - '...=CPU'"), so a same-line regex silently
+  # misses it — which is exactly what happened when these composes moved to list form
+  # (Docker Compose rejects `(gate|up|down)` in a folded string). Match per-token.
+  command grep -qE -- "=CPU|--cpu-moe|(^|[[:space:]'\"])-cmoe([[:space:]'\"]|$)|--n-cpu-moe|(^|[[:space:]'\"])-ncmoe([[:space:]'\"]|$)" \
+    "$compose_file"
+}
+
+# preflight_offload_split_mode <compose_file>
+# Refuses split modes that are measured-catastrophic under CPU offload.
+#
+# GUARD AND ADVISE — never auto-switch the mode. detect_nvlink.sh's auto mode is
+# the cautionary tale in this repo: it enables P2P on a DETECTED GRANT ALONE, and
+# that is what took the reference rig to a hang. Auto-selecting a split mode from
+# a detected property repeats that one layer up.
+preflight_offload_split_mode() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  is_cpu_offload_compose "$compose_file" || return 0   # not an offload compose → no-op
+
+  local sm="${SPLIT_MODE:-}"
+  # same-line form (folded command:)
+  [[ -z "$sm" ]] && sm="$(command grep -oE -- '(--split-mode|[[:space:]]-sm)[[:space:]]+[a-z]+' "$compose_file" | head -1 | awk '{print $NF}')"
+  # list form: the VALUE is the next list item after the flag
+  # list form: each arg is its own list item, so the VALUE is the NEXT line.
+  # A same-line regex silently misses it — the exact regression that shipped when
+  # these composes moved to list form (Compose rejects `(gate|up|down)` when folded).
+  if [[ -z "$sm" ]]; then
+    sm="$(awk -F"['\" ]+" '
+      /^[[:space:]]*-[[:space:]]+.?(--split-mode|-sm).?[[:space:]]*$/ { want=1; next }
+      want { for (i=1;i<=NF;i++) if ($i ~ /^(layer|row|tensor|none)$/) { print $i; exit } want=0 }
+    ' "$compose_file" | head -1)"
+  fi
+  [[ -z "$sm" ]] && return 0
+
+  if [[ "$sm" == "tensor" || "$sm" == "row" ]]; then
+    echo "[preflight] ERROR: --split-mode ${sm} with CPU expert offload is measured-catastrophic." >&2
+    echo "            Offloaded prefill: 305 t/s vs 2031 t/s on --split-mode layer (-85%)." >&2
+    echo "            Offloaded decode:  32.75 vs 47.14." >&2
+    echo "            With speculative decoding it SIGSEGVs on the second request while the" >&2
+    echo "            container still reports healthy — the worst possible failure shape." >&2
+    echo "            Why: under offload the GPU is idle ~87% of the time (SM 12.8%) waiting on" >&2
+    echo "            sequential CPU handoffs. TP parallelises GPU compute — which is NOT the" >&2
+    echo "            bottleneck — and adds an all-reduce that scales with batch size, so prefill" >&2
+    echo "            pays it ~1000x harder than decode. The experts are not even on the GPUs." >&2
+    echo "            Fix: use --split-mode layer (the llama.cpp default for multi-GPU)." >&2
+    return 1
+  fi
+
+  # Uneven VRAM: TP wants an even split, and offload composes pin per-device rules.
+  if [[ "$sm" == "layer" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    local sizes; sizes="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -u | wc -l)"
+    if [[ "${sizes:-1}" -gt 1 ]]; then
+      echo "[preflight] NOTE: mixed GPU memory sizes detected — residency is sized per device," >&2
+      echo "            so asymmetric counts are expected and fine on --split-mode layer." >&2
+    fi
+  fi
+  return 0
+}
+
+# preflight_cpu_offload_ram <compose_file>
+# Guards an offload compose against a host that cannot hold the experts.
+#
+# Reads the compose's `CPU-Offload-Host-RAM-GB:` header, which declares the
+# WORST CASE (all experts on CPU), then subtracts the expert bundles the launcher
+# will pin onto THIS rig's GPUs (offload_residency_grant_mib — the launcher's own
+# arithmetic, so gate and boot cannot disagree). Every pinned bundle is bytes NOT
+# in host RAM, which is why a 4-card rig needs less than a 2-card one and a
+# big-VRAM rig less than the header. When VRAM is unreadable the grant is 0 and
+# the gate degrades to the worst case — the safe direction.
+#
+# ⚠️ The header MUST stay the all-experts-on-CPU number. Pre-baking expected
+#    residency into it double-counts once the gate subtracts, and under-gates
+#    rigs whose cards fit fewer bundles than the header assumed (a 4x16 GB rig
+#    fits ZERO and truly needs the full worst case).
+#
+# ⚠️ The number is MEASURED, not computed. The quant name does not give you the
+#    byte size (UD-Q8_K_XL is really MXFP4 experts + BF16 attention), and on
+#    Unsloth *Dynamic* quants the per-layer bundles are not even uniform. Do not
+#    "simplify" this into a formula.
+preflight_cpu_offload_ram() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  declare -F compose_meta_get >/dev/null 2>&1 || return 0
+
+  local need_hdr
+  need_hdr="$(compose_meta_get "$compose_file" cpu-offload-host-ram-gb || true)"
+  [[ -z "$need_hdr" ]] && return 0                 # not an offload compose we size
+  if ! [[ "$need_hdr" =~ ^[0-9]+$ ]]; then
+    echo "[preflight] WARN:  CPU-Offload-Host-RAM-GB='${need_hdr}' is not an integer; skipping." >&2
+    return 0
+  fi
+
+  # Residency-adjusted need for THIS rig. Integer division floors the subtraction,
+  # which errs conservative (subtracts slightly less than granted).
+  local grant_mib=0 grant_gb=0 need_gb="$need_hdr"
+  if declare -F offload_residency_grant_mib >/dev/null 2>&1; then
+    grant_mib="$(offload_residency_grant_mib "$compose_file" 2>/dev/null || printf '0')"
+    [[ "$grant_mib" =~ ^[0-9]+$ ]] || grant_mib=0
+    if (( grant_mib > 0 )); then
+      grant_gb=$(( grant_mib / 1024 ))
+      need_gb=$(( need_hdr - grant_gb ))
+      (( need_gb < 1 )) && need_gb=1
+    fi
+  fi
+
+  if [[ ! -r /proc/meminfo ]]; then
+    echo "[preflight] WARN:  cannot read /proc/meminfo; skipping CPU-offload RAM check." >&2
+    return 0
+  fi
+  local kb total_gb avail_gb
+  kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)";     total_gb=$(( kb / 1024 / 1024 ))
+  kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"; avail_gb=$(( kb / 1024 / 1024 ))
+
+  if (( total_gb < need_gb )); then
+    echo "[preflight] ERROR: this compose offloads experts to host RAM and needs ~${need_gb} GB" >&2
+    if (( grant_gb > 0 )); then
+      echo "            on this rig (${need_hdr} GB worst case, minus ~${grant_gb} GB of experts" >&2
+      echo "            residency keeps on your GPUs), but the machine has only ${total_gb} GB TOTAL." >&2
+    else
+      echo "            (worst case: all experts on CPU), but the machine has only ${total_gb} GB TOTAL." >&2
+    fi
+    echo "            It cannot run here." >&2
+    echo "            This is a hard gate, not a tuning knob: below it the box thrashes or OOMs." >&2
+    echo "            Fix: use a lower-bit tier (the IQ2 slug needs ~86 GB), add RAM, or pick a" >&2
+    echo "            model that fits VRAM. On a 4-card rig the same model needs LESS host RAM," >&2
+    echo "            because residency moves expert bytes onto the GPUs." >&2
+    return 1
+  fi
+  if (( avail_gb < need_gb )); then
+    echo "[preflight] ERROR: needs ~${need_gb} GB of host RAM; only ${avail_gb} GB is AVAILABLE" >&2
+    echo "            (of ${total_gb} GB total). Something else is holding memory." >&2
+    echo "            Fix: stop other services and retry — 'docker ps' is the usual culprit." >&2
+    return 1
+  fi
+  if (( grant_gb > 0 )); then
+    echo "[preflight] cpu-offload: RAM ok — needs ~${need_gb} GB on this rig (${need_hdr} GB worst" \
+         "case, residency keeps ~${grant_gb} GB of experts on GPU), ${avail_gb} GB available"
+  else
+    echo "[preflight] cpu-offload: RAM ok — needs ~${need_hdr} GB (worst case), ${avail_gb} GB available"
+  fi
+  return 0
 }

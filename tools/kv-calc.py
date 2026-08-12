@@ -15,9 +15,10 @@ Predicts (per card, after TP split):
   - Total vs available VRAM
   - Verdict: PASS / TIGHT / FAIL
 
-Four models modelled:
+Curated hybrid models include:
   - Qwen 3.6 27B (DeltaNet hybrid: 16 full_attention + 48 GDN)
-  - Qwen 3.6 35B-A3B (MoE + DeltaNet hybrid: 10 attention + 30 GDN)
+  - Qwen 3.6 35B-A3B and same-geometry fine-tunes such as Agents-A1 and
+    Qwen-AgentWorld-35B-A3B (MoE + DeltaNet hybrid: 10 attention + 30 GDN)
   - Gemma 4 31B (SWA + dense MLP: 10 full_attention + 50 sliding_attention)
   - Gemma 4 26B-A4B (MoE + SWA: 5 full_attention + 25 sliding_attention)
 
@@ -45,6 +46,7 @@ Usage:
 """
 
 import argparse
+import math
 import json
 import logging
 import os
@@ -132,10 +134,16 @@ def _load_model_specs_from_yaml(profiles):
     # scan 2026-07-03: 0 mtp tensors) — mtp_n_default is inert (drafter=None).
     a1 = profiles.models["agents-a1"]
     a1spec = {"model_id": a1.id, "model_family": a1.family, **{k: getattr(a1, k) for k in qm_fields}, "valid_tp": list(a1.valid_tp), "weights_total_gb": _weight_size(a1, a1.default_weight_variant), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
+    # Qwen-AgentWorld-35B-A3B: same Qwen3-Next MoE geometry and KV math,
+    # with its own AWQ INT4 footprint. The config's inherited MTP declaration
+    # is normalized to zero by its ModelProfile because no mtp.* tensors ship.
+    agentworld = profiles.models["qwen-agentworld-35b-a3b"]
+    agentworld_spec = {"model_id": agentworld.id, "model_family": agentworld.family, **{k: getattr(agentworld, k) for k in qm_fields}, "valid_tp": list(agentworld.valid_tp), "weights_total_gb": _weight_size(agentworld, agentworld.default_weight_variant), "mamba_state_bytes": 4, "chunk_size": 256, "mtp_n_default": profiles.drafters["qwen-mtp-builtin"].n_default}
     return {
         "qwen3.6-27b": qspec,
         "qwen3.6-35b-a3b": qmspec,
         "agents-a1": a1spec,
+        "qwen-agentworld-35b-a3b": agentworld_spec,
         "gemma-4-31b": gspec,
         "gemma-4-26b-a4b": gmspec,
         "gemma-4-12b": g12spec,
@@ -226,6 +234,58 @@ QWEN_MOE_ACTIVATION_COEF = {
 QWEN_MOE_EXPERT_DISPATCH_GB = 0.20
 QWEN_MOE_BUILTIN_MTP_WORKSPACE_GB = 0.10
 
+# ---- GDN chunked-prefill scratch (DERIVED, not calibrated) ----------------
+# The coefficients above scale with max_ctx. That is the Cliff-2 shape, and it
+# leaves a real term completely invisible: the FLA chunked-prefill scratch
+# scales with `--max-num-batched-tokens`, NOT with max_ctx. With chunked
+# prefill on (every compose we ship), a 262K prompt is processed in batched
+# chunks, so these buffers are bounded by the BATCH, and doubling the batch
+# doubles them while the calibrated ctx term does not move at all.
+#
+# Unlike everything else in this section these numbers are DERIVED from the
+# kernel source, not fitted — `fla/ops/chunk_delta_h.py`:
+#
+#     h = k.new_empty(B, NT, H, V, K)      # NT = batched / FLA_CHUNK_SIZE
+#     v_new = torch.empty_like(u)          # in chunk_delta_h
+#     o     = torch.empty_like(v)          # in chunk_o
+#
+# with H = linear_num_v_heads / TP, V/K = the linear head dims, dtype = k.dtype
+# (bf16 = 2 B; note `final_state` IS fp32 but that is the per-sequence
+# recurrent state, modelled separately in _recurrent_state_per_card_bytes).
+#
+# Sanity anchor: Qwen3.6-27B at TP=2 gives h = batched × 12 KiB, so batched=8192
+# is exactly 100,663,296 B = 96.00 MiB — the allocation that failed in
+# club-3090 #838 on a 2× 5090, to the decimal.
+FLA_CHUNK_SIZE = 64          # fla/ops/utils.py FLA_CHUNK_SIZE (NOT spec["chunk_size"]=256, a different buffer)
+GDN_SCRATCH_DTYPE_BYTES = 2  # h/v_new/o inherit k.dtype; every GDN compose we ship runs --dtype bfloat16
+
+# Every calibration anchor in CALIBRATION was booted at this batch size, so the
+# empirical ctx coefficients ALREADY absorb the scratch at this value. The
+# scratch is therefore applied as a signed DELTA against this baseline: at the
+# default the prediction is byte-identical to before (calibration stays green
+# by construction), and it only moves when a config departs from it.
+GDN_SCRATCH_CALIBRATION_BATCHED_TOKENS = 8192
+
+
+def gdn_prefill_scratch_per_card_bytes(spec, tp, batched_tokens):
+    """Per-card FLA chunked-prefill scratch for one GDN layer's forward.
+
+    h + v_new + o, live simultaneously inside chunk_gated_delta_rule_fwd.
+    Linear in `batched_tokens` (i.e. --max-num-batched-tokens), NOT in max_ctx.
+    Returns 0 for non-GDN families.
+    """
+    heads = spec.get("linear_num_v_heads")
+    v_dim = spec.get("linear_v_head_dim")
+    k_dim = spec.get("linear_k_head_dim")
+    if not (heads and v_dim and k_dim):
+        return 0.0
+    heads_per_rank = heads / tp
+    nt = math.ceil(batched_tokens / FLA_CHUNK_SIZE)
+    h = nt * heads_per_rank * v_dim * k_dim * GDN_SCRATCH_DTYPE_BYTES
+    # v_new and o are both shaped like v: (batched, heads/rank, v_dim)
+    v_like = batched_tokens * heads_per_rank * v_dim * GDN_SCRATCH_DTYPE_BYTES
+    return h + 2 * v_like
+
 # ---- Gemma activation peak (mostly constant in ctx) ----
 # Unlike Qwen GDN, Gemma's activation peak comes from dense MLP forward +
 # SWA windowed-attention prefill, both bounded by chunked-prefill chunk_size.
@@ -269,6 +329,7 @@ COMPOSE_ALIAS_TEXT = {
     "qwen3.6-27b": "minimal=vllm/minimal dual=vllm/dual nvfp4-single=vllm/qwen-27b-single-nvfp4 nvfp4-dual=vllm/qwen-27b-dual-nvfp4",
     "qwen3.6-35b-a3b": "qwen-a3b-preview-single=vllm/qwen-a3b-preview-single qwen-35b-a3b-dual=vllm/qwen-35b-a3b-dual nvfp4-single=vllm/qwen-35b-a3b-single-nvfp4 nvfp4-dual=vllm/qwen-35b-a3b-dual-nvfp4",
     "agents-a1": "agents-a1-dual=vllm/agents-a1-dual",
+    "qwen-agentworld-35b-a3b": "dual=vllm/qwen-agentworld-35b-a3b-dual-awq-int4",
     "gemma-4-31b": "gemma-dual=vllm/gemma-bf16-mtp gemma-dual-int8=vllm/gemma-int8-mtp gemma-single=vllm/gemma-mtp-tp1",
     # gemma-4-12b legacy alias namespace is keyed by model id, so reusing the
     # bare `gemma-dual` string here is harmless — compat + the CLI always pass
@@ -750,7 +811,24 @@ def architecture_cache_breakdown(
     )
 
 
-def activation_peak_per_card_bytes(spec, kv_format, max_ctx, tp):
+def _gdn_scratch_delta(spec, tp, batched_tokens):
+    """Signed correction for a non-default --max-num-batched-tokens.
+
+    The calibrated ctx coefficients already absorb the scratch at
+    GDN_SCRATCH_CALIBRATION_BATCHED_TOKENS (every anchor was booted there), so
+    only the DELTA from that baseline is new information. batched_tokens=None
+    => 0.0, i.e. byte-identical to the pre-#838 model.
+    """
+    if batched_tokens is None:
+        return 0.0
+    here = gdn_prefill_scratch_per_card_bytes(spec, tp, batched_tokens)
+    base = gdn_prefill_scratch_per_card_bytes(
+        spec, tp, GDN_SCRATCH_CALIBRATION_BATCHED_TOKENS
+    )
+    return here - base
+
+
+def activation_peak_per_card_bytes(spec, kv_format, max_ctx, tp, batched_tokens=None):
     """Per-card peak activation during prefill forward.
 
     For Qwen 3.6 (DeltaNet GDN): linear in seq_len, KV-format-dependent
@@ -763,11 +841,13 @@ def activation_peak_per_card_bytes(spec, kv_format, max_ctx, tp):
     """
     if spec["model_family"] == "qwen3-next-hybrid":
         coef = QWEN_GDN_ACTIVATION_COEF[kv_format]
-        return (coef * spec["num_gdn_layers"] * max_ctx) / tp
+        base = (coef * spec["num_gdn_layers"] * max_ctx) / tp
+        return base + _gdn_scratch_delta(spec, tp, batched_tokens)
 
     elif spec["model_family"] == "qwen3-next-moe":
         coef = QWEN_MOE_ACTIVATION_COEF[kv_format]
-        return (coef * spec["num_gdn_layers"] * max_ctx) / tp + QWEN_MOE_EXPERT_DISPATCH_GB * 1e9
+        base = (coef * spec["num_gdn_layers"] * max_ctx) / tp + QWEN_MOE_EXPERT_DISPATCH_GB * 1e9
+        return base + _gdn_scratch_delta(spec, tp, batched_tokens)
 
     elif spec["model_family"] == "gemma4-swa-dense":
         const_bytes = GEMMA_ACTIVATION_CONST_GB * 1e9
@@ -829,6 +909,7 @@ def predict(
     drafter_gb=0.0,
     mtp=False,
     weights_variant="default",
+    max_num_batched_tokens=None,
 ) -> Prediction:
     """Predict per-card VRAM usage.
 
@@ -852,7 +933,9 @@ def predict(
     kv_pool_requested_gb = growing_b / 1e9
     kv_pool_sliding_fixed_gb = sliding_b / 1e9
 
-    activation_gb = activation_peak_per_card_bytes(spec, kv_format, max_ctx, tp) / 1e9
+    activation_gb = activation_peak_per_card_bytes(
+        spec, kv_format, max_ctx, tp, batched_tokens=max_num_batched_tokens
+    ) / 1e9
     overhead_gb = cudagraph_overhead_gb(mem_util, tp)
 
     # Drafter: prefer drafter_gb; fall back to legacy dflash_draft_gb.
@@ -1275,6 +1358,7 @@ def run_calibration():
 # =============================================================================
 
 def solve_max_ctx(spec, kv_format, max_num_seqs, tp, mem_util, vram_gb,
+                  max_num_batched_tokens=None,
                   drafter_gb=0.0, dflash_draft_gb=0.0, mtp=False, weights_variant="default"):
     """Binary search for the largest max_ctx that keeps the verdict at PASS or TIGHT."""
     lo, hi = 1024, spec.get("max_ctx_supported", 262144)
@@ -1289,6 +1373,7 @@ def solve_max_ctx(spec, kv_format, max_num_seqs, tp, mem_util, vram_gb,
             tp=tp, mem_util=mem_util, vram_gb=vram_gb,
             drafter_gb=drafter_gb, dflash_draft_gb=dflash_draft_gb,
             mtp=mtp, weights_variant=weights_variant,
+            max_num_batched_tokens=max_num_batched_tokens,
         )
         if p.verdict in ("PASS", "TIGHT"):
             best = mid
@@ -1622,6 +1707,11 @@ def main():
                    help="Drafter model size in GB (MTP / DFlash). 0 if not using a drafter.")
     p.add_argument("--dflash-draft-gb", type=float, default=None,
                    help="(deprecated alias for --drafter-gb)")
+    p.add_argument("--max-num-batched-tokens", type=int, default=None,
+                   help=("Chunked-prefill batch size. GDN models only: the FLA prefill scratch "
+                         f"(h + v_new + o) is linear in THIS, not in max_ctx. Omit to assume the "
+                         f"{GDN_SCRATCH_CALIBRATION_BATCHED_TOKENS} the calibration anchors were "
+                         "booted at (prediction then matches the calibrated model exactly)."))
     p.add_argument("--weights-variant", choices=["default", "int4", "awq", "bf16", "int8", "nvfp4"], default=None,
                    help="Gemma 4 only: which weight quant variant. Default: from --compose, or int4.")
     p.add_argument("--calibration", action="store_true", help="Print predicted vs measured for all calibrated models.")
@@ -1742,6 +1832,7 @@ def main():
             tp=tp, mem_util=mem_util, vram_gb=args.vram,
             drafter_gb=drafter_gb, dflash_draft_gb=dflash_gb, mtp=mtp,
             weights_variant=weights_variant,
+            max_num_batched_tokens=args.max_num_batched_tokens,
         )
         if best > 0:
             pred_at_best = predict(
@@ -1749,6 +1840,7 @@ def main():
                 tp=tp, mem_util=mem_util, vram_gb=args.vram,
                 drafter_gb=drafter_gb, dflash_draft_gb=dflash_gb, mtp=mtp,
                 weights_variant=weights_variant,
+                max_num_batched_tokens=args.max_num_batched_tokens,
             )
             if args.json:
                 out = pred_at_best.__dict__.copy()
@@ -1773,6 +1865,7 @@ def main():
         tp=tp, mem_util=mem_util, vram_gb=args.vram,
         drafter_gb=drafter_gb, dflash_draft_gb=dflash_gb, mtp=mtp,
         weights_variant=weights_variant,
+        max_num_batched_tokens=args.max_num_batched_tokens,
     )
 
     breakdown = None

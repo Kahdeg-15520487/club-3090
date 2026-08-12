@@ -68,6 +68,24 @@ def _entry(
     # PCIe); "prefetch" = vLLM bulk layer prefetch. Surfaced as the c3 catalog
     # "offload" column. First used by the Laguna 118B-MoE offload slugs.
     offload=None,
+    # True when the compose runs an adaptive expert cache (llama.cpp `--moe-cache`):
+    # hot CPU-resident experts are held in spare VRAM and served from there instead
+    # of over PCIe. Only meaningful alongside an `offload` backend — the cache exists
+    # to soften the miss path that offload creates.
+    #
+    # Load-bearing, not documentation: the launch-compat layer gates its
+    # MOE_RESERVE_MB injection on this flag (`_moe_cache_env`), so a compose that
+    # runs the cache without declaring it silently keeps a reserve derived on a
+    # 24 GB card no matter what the detected hardware is. `--moe-cache auto` grants
+    # free-minus-reserve, and on the reference rig a reserve 512 MiB too small cost
+    # ~11% throughput while REPORTING a bigger pool and a higher hit rate.
+    moe_cache=False,
+    # Minimum HOST RAM in GB for a weight-offload slug — the worst case (all experts
+    # on CPU). This is a HARD GATE, not a recommendation: below it the box thrashes or
+    # OOMs, and preflight_cpu_offload_ram() REFUSES. Surfaced as the c3 catalog
+    # "host RAM" column so a user sees it BEFORE selecting a slug, rather than
+    # discovering it at launch refusal. None = fully VRAM-resident, nothing to warn about.
+    host_ram_gb=None,
     chat_template="native",
     tp,
     max_ctx,
@@ -123,6 +141,8 @@ def _entry(
         "act_format": act_format,
         "act8_capable": act8_capable,
         "offload": offload,
+        "moe_cache": bool(moe_cache),
+        "host_ram_gb": host_ram_gb,
         "chat_template": chat_template,
         "tp": tp,
         "pp": 1,
@@ -221,6 +241,7 @@ COMPOSE_REGISTRY = {
         engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="fp8_e4m3",
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml",
+        status="caveats",
         default_port=8010,
         kvcalc_key="qwen3.6-27b:dual",
     ),
@@ -242,6 +263,7 @@ COMPOSE_REGISTRY = {
         engine="vllm-stable", drafter="qwen-mtp-builtin", kv_format="fp8_e4m3",
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml",
+        status="caveats",
         default_port=8010,
         kvcalc_key="qwen3.6-27b:dual",
         status_note="Alias of vllm/dual — names the 'fast' tier in the fast/max family (AutoRound INT4 + fp8_e5m2 KV + MTP n=3, TP=2 @262K). Same compose + port as vllm/dual; production-validated there (129/150). Pair with vllm/qwen-27b-dual-max for higher fidelity.",
@@ -253,7 +275,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/vllm/compose/dual/fp8/mtp.yml",
         default_port=8013,
         kvcalc_key="SKIP",
-        status="production",
+        status="caveats",
         status_note="Qwen3.6-27B 'max accuracy' tier, 2-card: official FP8 weights (embedded MTP head) + fp8/e4m3 KV (flipped from int8-PTH in #594) + MTP n=3, TP=2 @262K. fp8/e4m3 routes KV attention to FlashInfer (int8-PTH is TRITON_ATTN-only): decode stays FLAT at depth — 2.3x int8-PTH @35K — where int8-PTH craters. Full v0.24.0 gate: verify-full 9/9, verify-stress fillable to 240,636 tok, soak-continuous PASS (0 err / 0 growth / 100% retention, p50 decode 125.5), 8-pack --full 109/150 (ties int8-PTH's 107, quality-neutral despite fp8 scale=1.0 — vLLM disables calculate_kv_scales on Qwen3-Next hybrid). KV pool 295K tok / 1.13x concurrency (smallest pool of the tiers; FP8 weights use MarlinFP8 W8A16 on Ampere — memory win, not decode). The highest-fidelity weight tier; consumer Blackwell (5090+) gets native FP8 GEMM via the launcher's DeepGEMM-disable. Also the validation proxy for vllm/qwen-27b-multi-max (same config @ TP=4).",
     ),
     "vllm/qwen-27b-dual-lmcache": _entry(
@@ -283,7 +305,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/mtp.yml",
         default_port=8014,
         kvcalc_key="SKIP",
-        status="production",
+        status="caveats",
         status_note="Qwen3.6-27B 'fast' tier, 4-card (TP=4): AutoRound INT4 + fp8_e5m2 KV + MTP n=3 @262K. Byte-identical to vllm/dual (≡ vllm/qwen-27b-dual-fast) apart from TP=4 + gpu-count; vllm/dual @TP=2 is the on-rig proxy (this dev rig has 2× 3090). Promoted 2026-07-05 on the cross-rig validation the header required — #584 (@ryanmpelletier, 4× 3090): verify-full 9/9, verify-stress clean to 240K, soak PASS, bench n=5. The 4 cards buy concurrency — KV pool 1.77M/6.77× vs the 2-card 622K/2.37× (single-stream decode ~flat). Quality is TP-invariant, carried from the vllm/dual proxy (109/150); a 4-card 8-pack confirmation is the open follow-up.",
     ),
     "vllm/qwen-27b-multi-max": _entry(
@@ -293,7 +315,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/vllm/compose/multi4/fp8/mtp.yml",
         default_port=8015,
         kvcalc_key="SKIP",
-        status="production",
+        status="caveats",
         status_note="Qwen3.6-27B 'max accuracy' tier, 4-card (TP=4): official FP8 weights + fp8/e4m3 KV (flipped from int8-PTH alongside dual-max #594/#595) + MTP n=3 @262K. Byte-identical to vllm/qwen-27b-dual-max apart from TP=4 + gpu-count (dual-max @TP=2 is the on-rig proxy; this dev rig has 2 cards). Promoted 2026-07-07 on the clean v0.24.0 4-card validation the caveats required — #584 (@ryanmpelletier, 4× 3090 x16): verify-full 9/9, verify-stress clean to 240K, soak PASS, bench n=5, 8-pack 111/150 (ties the dual-max proxy 109 → quality TP-invariant). Corroborated by a 2nd 4-card rig — #625 (@MoppelMat, 4× 3090 mixed x4/x8, 300 W: decode 79/102, prefill-90K clean, soak PASS). fp8/e4m3 routes KV attention to FlashInfer (int8-PTH is Triton-only) → flat decode at depth. TP=4 buys the 6.77x KV pool; single-stream decode ~flat vs 2-card.",
     ),
 
@@ -316,7 +338,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/vllm/compose/single/nvfp4/mtp.yml",
         default_port=8076, required_sm=9.0, fallback_sm=7.5,
         kvcalc_key="qwen3.6-27b:nvfp4-single",
-        status="experimental",
+        status="caveats",
         status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION: NVFP4 FFN + FP8 attention + FP8 KV scales + unquantized MTP head), single Hopper/Blackwell card (native sm_90+ — H100 / 5090 / RTX 6000 Pro / GB10; fallback_sm=7.5: sub-9.0 cards RUN it via the Marlin W4A16 weight-only fallback since vLLM v0.24 — no native-FP4 speed edge, and this single-card config needs >24 GB VRAM regardless). 🧪 AUTHORED BLIND on the sm_86 dev rig, community-validated on two 5090s (#613 @guybrush01 + #617 @paulp83). Root cause of the original OOM was MTP, not ctx: MTP-on at 98K left no room for the draft head + cudagraphs + GDN prefill scratch. Default is now MTP-on + MAX_MODEL_LEN=65536 + mem_util=0.85 — the config that keeps MTP's ~2x AND fits (verify-stress all-pass, 131/155 TPS decode, MTP accept ~3.2, ~1.4 GB VRAM free @ 65K). SPEC=off trades MTP for more ctx (81K/98K @ 71 TPS) and is the tight-system-RAM path (MTP's draft load OOM-kills a 28 GB host, #617). CEILING DE-BLINDED 2026-07-12 (#617 @paulp83, headless 32 GB 5090): MTP-on verify-stress ALL-PASS + NIAH-clean to 91K at MAX_MODEL_LEN up to 98K (100K = boot-fit edge) — so the MTP-on ceiling is ~98K on a headless 5090, not 65K; #613's 98K OOM was the tighter desktop condition. 65K stays the conservative fits-anywhere default. 80 GB+ cards raise MAX_MODEL_LEN toward 262K with MTP on. fp8/e4m3 KV runs scale=1.0 (FP8 KV declared in hf_quant_config, NO k_scale/v_scale tensors shipped — index-verified, the #594-tied regime). ~2.5x smaller than bf16, NVIDIA MMLU-Pro/GSM8K deltas <1% vs bf16 per the model card. 8-pack think-off measured 2026-07-11 on the dual sibling (sm_86 Marlin fallback, weight-identical): 110/150 — ties the fp8 tier's 109; native-FP4 activation path still owed (stays 🧪). No DEFAULTS row (opt-in only).",
     ),
     "vllm/qwen-27b-dual-nvfp4": _entry(
@@ -327,8 +349,8 @@ COMPOSE_REGISTRY = {
         default_port=8077, required_sm=9.0, fallback_sm=7.5,
         requires_homogeneous_arch=True,
         kvcalc_key="qwen3.6-27b:nvfp4-dual",
-        status="experimental",
-        status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION — see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (the 2x 5090 configuration is the primary community target; fallback_sm=7.5). HOMOGENEOUS RIGS ONLY (#762 @paulp83): mixed-arch TP crashes in torch.compile AOT -- a 5090 sm_120 + 3090 Ti sm_86 pair loads weights fine via the Marlin fallback, then the Inductor emits `tl.float8e4nv` MXFP8 ACTIVATION kernels the Ampere rank cannot compile (`type fp8e4nv not supported in this architecture`); TP1 dies, TP0 hangs on the broadcast. fallback_sm reasons PER CARD but the weight-only fallback is a property of the whole TP GROUP -- guarded from 2026-07-26 by Requires-homogeneous-arch in preflight. LIVE-VALIDATED ON 2x3090 sm_86 (HOMOGENEOUS) 2026-07-11 via the Marlin W4A16 fallback: boots @262K + fp8 KV + MTP n=3 (accept 97%+), 69.7 narr / 85.5 code decode TPS, 23.77 GB/card, 8-pack think-off 110/150 — statistically TIES the fp8 production tier's 109 (weight-identical path; native-FP4 activations unmeasured). On Ampere it works but has NO edge (~20% slower than the AutoRound tier for the same model) — prefer AutoRound/fp8 there; this slug's value on sub-sm_90 cards is models/cases where NVFP4 is the only quant. First native-FP4 community boot + rebench-full still wanted (funnel). Mirrors vllm/qwen-27b-dual-max's shape (TP=2 + MTP n=3 + fp8/e4m3 KV + vision @262K) with NVFP4 weights instead of FP8: ~11 GB/card weights vs dual-max's 14.5 — bigger KV pool headroom on 32 GB cards. On native-FP4 GEMM parts (Blackwell) NVIDIA claims near-fp8 throughput at 2.5x less weight memory. No DEFAULTS row (opt-in only).",
+        status="caveats",
+        status_note="Qwen3.6-27B NVFP4 (nvidia modelopt MIXED_PRECISION — see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (the 2x 5090 configuration is the primary community target; fallback_sm=7.5). HOMOGENEOUS RIGS ONLY (#762 @paulp83): mixed-arch TP crashes in torch.compile AOT -- a 5090 sm_120 + 3090 Ti sm_86 pair loads weights fine via the Marlin fallback, then the Inductor emits `tl.float8e4nv` MXFP8 ACTIVATION kernels the Ampere rank cannot compile (`type fp8e4nv not supported in this architecture`); TP1 dies, TP0 hangs on the broadcast. fallback_sm reasons PER CARD but the weight-only fallback is a property of the whole TP GROUP -- guarded from 2026-07-26 by Requires-homogeneous-arch in preflight. LIVE-VALIDATED ON 2x3090 sm_86 (HOMOGENEOUS) 2026-07-11 via the Marlin W4A16 fallback: boots @262K + fp8 KV + MTP n=3 (accept 97%+), 69.7 narr / 85.5 code decode TPS, 23.77 GB/card, 8-pack think-off 110/150 — statistically TIES the fp8 production tier's 109 (weight-identical path; native-FP4 activations then-unmeasured). NATIVE-FP4 NOW MEASURED — FULL GATE PASS on 2x 5090 sm_120 2026-08-02 (#849 @paulp83, no power cap): verify-full 8/8, verify-stress 7/7 (NIAH 240,636 = 91% of 262K, margin 1,545 MB, delta -18 MB across the whole ladder), soak-continuous PASS (VRAM flat), decode 168.0 narr / 215.7 code TPS (CV ~1%), TTFT 69/77 ms, prefill 4,545 @10K / 3,919 @90K, MTP accept-len 4.0 at 100% per-position, peak 30,576/32,607 MiB per card (93.8%), KV pool 14.68 GiB / 841,541 tok. 8-pack 117/150 think-off / 116/150 think-on (benchlocal v0.9.8; pass@3 117/125) -- NOT comparable to the 110 above (different benchlocal version); the like-for-like modern control is @henrykrinkle01's v0.9.9 FP8 run at 117 think-off, i.e. native-FP4 activations cost nothing measurable. On Ampere it works but has NO edge (~20% slower than the AutoRound tier for the same model) — prefer AutoRound/fp8 there; this slug's value on sub-sm_90 cards is models/cases where NVFP4 is the only quant. ENVELOPE CORRECTED BY #849: that run used util 0.85 (reporter's own override; shipped default at his checkout was 0.92) with batched-tokens at the then-shipped 8192, and passing the full gate on that pairing showed the #847 derate had the right diagnosis but the wrong lever -- card 32,607 MiB, util 0.85 leaves 4,891 MiB physical headroom vs 0.92's 2,609 MiB, while the process holds 2,860 MiB ABOVE its own budget (un-profiled GDN activation peak, vllm#44209); the overshoot fits at 0.85 and not at 0.92, so util was binding and the batched cut was not. MAX_NUM_BATCHED_TOKENS restored 2048 -> 8192 (the desk-derived 2048 was costing prefill); util 0.85 kept. STILL WANTED: a second independent 32 GB pair, and a rebench once vllm#50021 is inherited. Mirrors vllm/qwen-27b-dual-max's shape (TP=2 + MTP n=3 + fp8/e4m3 KV + vision @262K) with NVFP4 weights instead of FP8: ~11 GB/card weights vs dual-max's 14.5 — bigger KV pool headroom on 32 GB cards. On native-FP4 GEMM parts (Blackwell) NVIDIA claims near-fp8 throughput at 2.5x less weight memory. No DEFAULTS row (opt-in only).",
     ),
 
     # Qwen 3.6 27B, llama.cpp single-card.
@@ -423,7 +445,7 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8060,
         kvcalc_key="SKIP",
-        status="caveats",
+        status="deprecated",
         status_note="Single-GPU default. Launchers inject the beellama engine pin (Anbeeld's official v0.3.2-preview digest — engines/beellama-local.yml install.spec); sm_86 verified on this rig 2026-07-04 (verify-full all-pass); sm_89 IS natively compiled (890 in the image's CUDA ARCHS per the #693 boot log — NOT an sm_80 fallback) but DFlash returns gibberish on Ada, so default_arch_allow=[\"8.6\"] steers 4090/5090 off this default (#693). 5090/sm_120: official images build on CUDA 12.4 and carry NO sm_120 (upstream ask Anbeeld#85) — self-build with CUDA_DOCKER_ARCH=120 + CUDA_VERSION=12.8.1 (engine notes have the verified recipe) or the unmaintained v0.3.0-feature-level snapshot ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397. Usable ctx ceiling 160K (200K OOMs on prefill); ships 102K. DFlash prose is net-positive on tok/s (+27% vs no-spec, re-tested 2026-06-03); the earlier 'prose-DFlash regression' is RETRACTED — it was an AR over-read + wrong baseline (docs/UPSTREAM.md).",
     ),
 
@@ -437,7 +459,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/beellama/compose/single/qwopus-coder-mtp-q5km/mtp.yml",
         default_port=8067,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Qwopus3.6-27B-Coder (Jackrong) Q5_K_M GGUF + EMBEDDED MTP head (--spec-type draft-mtp) + KVarN-4 KV, single 3090. Launch with --force (experimental). REQUIRES the KVarN engine build (beellama v0.3.2 PREVIEW, digest-pinned) — the v0.3.0/earlier images reject --cache-type-k kvarn4. 2026-06-12 on sm_86: embedded MTP head loads, verify-full all-pass, NIAH needle @72K (= q5_0/q4_1 control), bench ~46/58 TPS narr/code (≈ q5_0/q4_1 — KVarN decode-neutral), 8-pack quality 104/103 think-off/on ≈ q5_0/q4_1 102/107 (quality-neutral; disc #329). Ships 160K (MTP-on ceiling; 230K via the no-MTP env opt-in in the compose). Launcher path (switch.sh --force) + soak-continuous PASS (0-growth, 0/25 silent-empty, 100% retention). beellama v0.3.2 is a rolling PRE-RELEASE → stays experimental (un-park on a stable Anbeeld tag; full verify-stress NIAH ladder pending for ⚠️ promotion).",
     ),
 
@@ -451,7 +473,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/beellama/compose/single/carnice-v2-q5km/mtp-kvarn4.yml",
         default_port=8068,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Carnice-V2-27B (stuchapin — kai-os/Carnice-V2-27b, Hermes-style agentic SFT of Qwen3.6-27B) Q5_K_M GGUF + EMBEDDED MTP head (--spec-type draft-mtp, n=1) + KVarN-4 KV, single 3090. Launch with --force (experimental). REQUIRES the KVarN engine build (beellama v0.3.2 PREVIEW, digest-pinned) — v0.3.0/earlier reject --cache-type-k kvarn4. FULLY VALIDATED 2026-06-14 (rebench-full, reasoning-on): engine-compat PASS (beellama LOADS the PR#22673-fused GGUF — the card's 'mainline fails to load' does NOT apply), verify-full all-pass, verify-stress 8/8 (NIAH clean to 150K), soak PASS (0-growth, 0/100 silent-empty, 100.5% retention, p50 49.5 TPS), bench 46.8/50.5 TPS narr/code, MTP accept ~94%. 8-pack reasoning-on 110/150 — BEATS sibling beellama/qwopus-coder 103/150 (edge is agentic/instruct: hermes 13 vs 10, instructfollow 15, reasonmath 13; dataextract 10 = Qwen-family number-format floor). Ships 160K (MTP-on default; 176K measured ceiling, 192K OOMs; 230K via the no-MTP env opt-in). n=1 default; n=2 is a +12%-TPS opt-in (DRAFT_N_MAX=2, doesn't crash on our single-card kvarn4 unlike the author's 2×3090) pending a dedicated soak. beellama v0.3.2 is a rolling PRE-RELEASE → stays experimental (un-park on a stable Anbeeld tag, #455).",
     ),
     "beellama/carnice-v2-dual-q8-mtp": _entry(
@@ -461,7 +483,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml",
         default_port=8070,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Carnice-V2-27B Q8_0 + EMBEDDED MTP head (--spec-type draft-mtp, n=1) + q8_0/q8_0 KV, DUAL 3090 (layer-split -ts 0.55,0.45). The dual / higher-quant follow-through requested in #403 (Q5_K_M single = beellama/carnice-v2-single-q5km-mtp). FULLY VALIDATED 2026-06-16 (rebench-full): verify-full ALL-PASS, bench n=5 narr 40.7/code 44.0 decode TPS, verify-stress 8/8 (NIAH->240K), soak fresh 20x5 PASS (0 growth, 0/100 silent-empty, p50 42.2, 100% retention), 8-pack think-OFF 103/150 / think-ON 105/150 (in-band, q8_0 KV held quality). MTP accept ~81%, full 262K fits @ -ts 0.55,0.45 (21.9/21.2 GB/card, ~2.5GB free). KV A/B: chose q8_0 over the originally-spec'd kvarn6 — q8_0 prefills +17% (1003 vs 860 t/s; kvarn6's software-compression compute throttled prefill), higher-fidelity (q8 > q6-class), reference path (kvarn6 = Anbeeld 'experimental'), fits 262K on dual. -b/-ub/--no-mmap A/B'd FLAT; n=2 = +13% validated-stable opt-in (DRAFT_N_MAX=2). DFlash A/B RULED OUT (base-27B drafter ~10% accept on the fine-tune; no Carnice-matched drafter exists) → MTP-only. Launch --force. beellama v0.3.2 rolling pre-release → experimental (#455).",
     ),
     # Qwen3.6-27B-MTP-pi-reasoning (bytkim) — reasoning fine-tune, Q4_K_M GGUF + embedded
@@ -643,6 +665,16 @@ COMPOSE_REGISTRY = {
         status="caveats",
         status_note="Gemma-4-31B cyankiwi QAT-AWQ-INT4 (compressed-tensors, lm_head bf16), dual TP=2 BF16 KV @224K, stock vLLM v0.24.0 OVERLAY-FREE — the consolidation 31b (folds onto vllm-stable, retires the 31b's vllm-gemma-stable dependence). BF16 (not int8-PTH): on v0.24.0 int8-PTH allocates 262K but SILENTLY craters recall past ~32K (needs #40391, open/conflicting upstream — verified 2026-07-01, both cyankiwi + w4a16 crater identically; the SAME cyankiwi weights on v0.22.0+#40391 recall clean to 112K+). bf16 KV is overlay-free + no cliff. rebench-full VALIDATED 2026-07-02 @0.95/229376: verify-full 9/9 (tools+streaming-tool-calls+reasoning clean, MTP-off), verify-stress ALL 5 ceiling rungs to 210K (91%) with healthy VRAM margin 1162MB>1024 (the 0.97/245K thin-margin flag is resolved at 0.95/224K), bench decode ~59 TPS (CV 0.1%, TTFT 69ms), soak PASS (0 err · 0 MiB growth · 0/100 silent · p50 58.7 · 99.6% retention). tie_weights dodged (lm_head excluded), gemma4 tool+reasoning parsers native (#45588). CAVEATS: (1) MTP DISABLED — Gemma-4 MTP×tool-calling broken on v0.24.0 (vLLM #39043; #42006 closed-unmerged); (2) ~224K ceiling (bf16 ~2×/tok vs int8-PTH's 262K) — int8-PTH+#40391 (262K) returns free when #40391 merges. Supersedes gemma-int8-mtp/gemma-bf16-mtp/qat-w4a16 for v0.24.0. 8-pack deferred (maintainer call).",
     ),
+    "vllm/gemma-31b-multi-google-qat-w4a16": _entry(
+        model="gemma-4-31b", weights_variant="google-qat-w4a16", workload="long-ctx-single", chat_template="gemma-canonical",
+        engine="vllm-stable", drafter="gemma-it-assistant", kv_format="bf16",
+        tp=4, max_ctx=262144, max_num_seqs=2, mem_util=0.91,
+        compose_path="models/gemma-4-31b/vllm/compose/multi4/google-qat-w4a16/base.yml",
+        default_port=8034,
+        kvcalc_key="gemma-4-31b:gemma-dual",
+        status="caveats",
+        status_note="Official google/gemma-4-31B-it-qat-w4a16-ct (compressed-tensors W4A16), TP=4 BF16 KV @262K on stock vLLM v0.25.1 with official Gemma assistant MTP n=2. Production-gated 2026-07-28 on 4x RTX 3090 PCIe at 230W/card: 650,262-token / 14.84-GiB KV pool (2.48x at 262,144); recall passed through 257,544 tokens with 1,213 MiB/card free; verify-full passed chat, tools, streaming tools, reasoning, cascade, and profile AL floor; vision smoke identified a blue circle on red; continuous soak passed 100/100 with zero errors/silent outputs/VRAM growth and 104.2% TPS retention. Canonical decode 80.61 narrative / 92.34 code TPS; 10K/90K prefill 981/692 tok/s. Full 8-pack: 116/150 thinking-off and 122/150 thinking-on. Full n=1..4 sweep: all arms passed 20/20 streamed two-tool calls; n=2 changes narrative/code decode -2.2%/+11.7% (~+4.7% equal-weight aggregate) versus no MTP. CAVEATS: uses all four GPUs; near-max text leaves only 1.2 GiB/card, so vision plus near-max text is unvalidated.",
+    ),
 
     # Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) — QAT-int4 fidelity alt to
     # autoround-int4. Same dual / int8-PTH-KV(#40391) / assistant-MTP path as gemma-int8-mtp.
@@ -717,7 +749,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/gemma-4-12b/beellama/compose/single/beellama-q8kxl/base.yml",
         default_port=8067,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Gemma-4-12B Q8_K_XL single-3090 on beellama.cpp (q5_0(K)/q4_1(V) KV, 256K via --override-kv, no spec-dec). NIAH-clean to 246K. Launchers inject the beellama engine pin (Anbeeld's official v0.3.2-preview digest — engines/beellama-local.yml install.spec; no sm_120 until Anbeeld#85). Preview = rolling pre-release → experimental; promote on a stable tag.",
     ),
     "llamacpp/gemma-12b-single-q8kxl": _entry(
@@ -752,7 +784,7 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8061,
         kvcalc_key="SKIP",
-        status="caveats",
+        status="deprecated",
         status_note="Single-GPU default — the only viable fast single-card Gemma-4 path on Ampere. Launchers inject the beellama engine pin (Anbeeld's official v0.3.2-preview digest — engines/beellama-local.yml install.spec); sm_89 IS natively compiled (890 in the image's CUDA ARCHS — NOT an sm_80 fallback) but the same beellama DFlash path (validated only on sm_86) is unvalidated/likely-broken on Ada, so default_arch_allow=[\"8.6\"] steers off-86 users off this default (#693). 5090/sm_120: official images build on CUDA 12.4 and carry NO sm_120 (upstream ask Anbeeld#85) — self-build with CUDA_DOCKER_ARCH=120 + CUDA_VERSION=12.8.1 (engine notes) or the unmaintained v0.3.0-feature-level snapshot ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397. DFlash prose is net-positive on tok/s (+28–31% vs no-spec, re-tested 2026-06-03; earlier 'prose regression' RETRACTED — AR over-read + wrong baseline); re-point to mainline llama.cpp#23398 Gemma-4 MTP when it merges — docs/UPSTREAM.md.",
     ),
     # Dual-card beellama Gemma-4 (layer-split, 262K) — PARKED upstream-gated 2026-05-31.
@@ -768,7 +800,7 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8062,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Dual-card beellama Gemma-4 (layer-split, 262K) on v0.3.0 — RELEASED experimental for community v0.3.0 testing (Anbeeld's request, club-3090#288). Multi-GPU DFlash FIXED on v0.3.0 (GPU cross-ring; validated sm_86 2026-06-01, FA_ALL_QUANTS=1; image injected from beellama-local install.spec = Anbeeld's official server-cuda-v0.3.0 commit tag). Earlier 'v0.3.0-wide DFlash-on-PROSE regression' RETRACTED (2026-06-03) — did NOT reproduce on qwen single+dual or gemma single (DFlash prose net-positive +27–58% vs no-spec); was an AR over-read + wrong baseline. This gemma-dual not separately re-benched. Promote experimental→caveats when Anbeeld tags a STABLE release. docs/UPSTREAM.md.",
     ),
 
@@ -786,7 +818,7 @@ COMPOSE_REGISTRY = {
         compose_path="models/qwen3.6-27b/beellama/compose/dual/beellama-q8kxl-mtp/mtp.yml",
         default_port=8064,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Dual-card beellama Qwen3.6-27B Q8_K_XL + embedded MTP head (--spec-type draft-mtp, unsloth-mtp-gguf drafter). v0.3.0 sm_86 2026-06-01: boots + coherent, MTP active (code accept ~0.90, ~58 TPS decode). Ships 65536 safe first-boot ctx; validated robust to ~160K (262K impossible — DeltaNet recurrent draft state hard-pins to one card). High-fidelity Q8 sibling of vllm/dual fp8-mtp. Promote experimental→caveats on a STABLE Anbeeld tag.",
     ),
     "beellama/qwen-dflash-dual": _entry(
@@ -797,7 +829,7 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8065,
         kvcalc_key="SKIP",
-        status="upstream-gated",
+        status="deprecated",
         status_note="⏸️ UPSTREAM-GATED — cannot load on the pinned image, and the pin bump that would fix loading breaks context instead. Failure on the current pin: Anbeeld re-exported the drafter repo in upstream format 2026-07-19 and dropped IQ4_XS, and our pinned v0.3.2-preview digest is a fork build whose llama.cpp base predates the current Qwen3.6 GGUF conversion — it refuses the new-format drafter (missing hidden_norm.weight) and the referenced anbeeld-dflash-iq4xs artifact no longer exists. CORRECTION 2026-07-26: an earlier note said this and the Ada gibberish (#693) 'both un-break on v0.4.0' — FALSE. v0.4.x swaps fork-DFlash for upstream draft-dflash, which OOMs card0 at 262K (live Ampere 2026-07-21; single 102K->27K). Anbeeld closed our Anbeeld#98 as won't-fix (upstream architecture), and v0.4.1 stable is the SAME COMMIT as the preview we OOM'd on. Blocked on an upstream llama.cpp memory fix, not a pin bump; queued for retirement with the beellama engine (todo 2026-07-26). Re-statused from experimental 2026-07-26 per #740. HISTORICAL: v0.3.0 sm_86 2026-06-01 booted + coherent at 262K, code accept 0.58 / prose ~0.41.",
     ),
     "beellama/gemma-q8-dflash-dual": _entry(
@@ -808,7 +840,7 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8066,
         kvcalc_key="SKIP",
-        status="experimental",
+        status="deprecated",
         status_note="Dual-card beellama Gemma-4-31B Q8_K_XL + DFlash (Anbeeld DFlash-IQ4_XS draft). v0.3.0 sm_86 2026-06-01: 192K balanced ceiling (tensor-split 0.55,0.45 → ~21.4/21.9 GB; 262K OOMs — Gemma full-attn layers grow KV). High-fidelity Q8 sibling of beellama/gemma-dflash-dual (q4ks). Earlier 'v0.3.0-wide DFlash-on-PROSE regression' RETRACTED (2026-06-03) — didn't reproduce on qwen single+dual or gemma single; was an AR over-read + wrong baseline. This gemma-Q8-dual not separately re-benched. Promote on a STABLE tag.",
     ),
 
@@ -928,7 +960,7 @@ COMPOSE_REGISTRY = {
         requires_homogeneous_arch=True,
         kvcalc_key="qwen3.6-35b-a3b:nvfp4-dual",
         status="experimental",
-        status_note="Qwen3.6-35B-A3B NVFP4 (see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (2x 5090 primary community target; ~11.7 GB/card weights; fallback_sm=7.5 — sub-9.0 cards run it via the Marlin W4A16 fallback, validated on the 27B sibling 2026-07-11, though on Ampere the AutoRound tier serves this model faster). 🧪 first community boot + rebench-full validates. Mirrors vllm/qwen-35b-a3b-dual's shape (no drafter — MTP net-negative on this MoE, vision on, thinking off) with NVFP4 weights + fp8/e4m3 KV instead of AutoRound + e5m2. No DEFAULTS row (opt-in only).",
+        status_note="Qwen3.6-35B-A3B NVFP4 (see single-nvfp4) at TP=2 @262K full ctx, 2x Hopper/Blackwell native (2x 5090 primary community target; ~11.7 GB/card weights; fallback_sm=7.5 — sub-9.0 cards run it via the Marlin W4A16 fallback, validated on the 27B sibling 2026-07-11, though on Ampere the AutoRound tier serves this model faster). VALIDATED 2026-08-02 on 2x 5090 sm_120 (#858 @paulp83, no power cap) -- the LAST unvalidated slug in the NVFP4 arc, and the only one that had zero reports (the single was covered by #619 + #612). Full chain: verify-full + verify-stress 6/6 rungs to 240K (91% of 262K), soak-continuous PASS (0 err, 0/25 silent-empty), decode 274.1 narr / 274.6 code TPS (n=5, CV 0.2%/0.1%), TTFT 57/56 ms, ~15,400 tok/s prefill @90K, KV pool 16.58 GiB / 3,292,687 tok, 30,961/30,401 MiB per card. 8-pack 110/150 think-off / 120/150 think-on (benchlocal v0.9.8; pass@3 118/129). MTP confirmed OFF in the boot log (no speculative_config) exactly as designed, so vllm#50021 does NOT apply to this slug. SAME-RIG SAME-DAY A/B vs the AutoRound sibling (#851): decode +8.8%/+8.6% with quality a wash (-4 think-off / +5 think-on, inside the +-5-7 band) -- on Ampere the NVFP4 MoE path measured -1.5% vs AutoRound, so this is the first measurement of the native-FP4 crossover on this MoE. STATUS DELIBERATELY UNCHANGED at experimental: one clean rig. The single sibling was promoted only on TWO independent validations (#666), so a second 32 GB pair is the promotion trigger here. Mirrors vllm/qwen-35b-a3b-dual's shape (no drafter — MTP net-negative on this MoE, vision on, thinking off) with NVFP4 weights + fp8/e4m3 KV instead of AutoRound + e5m2. No DEFAULTS row (opt-in only).",
     ),
 
     "vllm/qwen-35b-a3b-dual-nvfp4-fast": _entry(
@@ -940,6 +972,23 @@ COMPOSE_REGISTRY = {
         kvcalc_key="qwen3.6-35b-a3b:nvfp4-dual",
         status="caveats",
         status_note="Qwen3.6-35B-A3B NVFP4-Fast (unsloth compressed-tensors MIXED: true W4A4 NVFP4 expert FFNs + FP8-dynamic attention; quant auto-detects — NOT modelopt), TP=2 @262K. THE AMPERE-VALIDATED NVFP4 PATH — inverse of dual-nvfp4: FIRST-PARTY VALIDATED on the reference 2x3090 2026-07-11 (first MoE-FP4 fallback boot anywhere, MARLIN NvFp4 MoE backend): decode 179.5/179.4 (n=5, CV<=0.8%) + 8-pack think-off 103/150 = DOUBLE STATISTICAL TIE with the AutoRound tier (182.3/182.3, 104-equiv) at full 262K, 22.46 GB/card; cli-40 20/40 = best measured on this MoE. See BENCHMARKS 2026-07-11. PROMOTED to Production w/ caveats 2026-07-11 on the full gate: verify-stress 8/8 (NIAH to 240,635 = 91%, ceiling margin 1,801 MB) + soak-continuous PASS (0 err, 0 growth, 100% retention) + bench + 8-pack. CAVEATS: streaming-toolcall+thinking-on finish=length (known family class, verify-full check 6; non-streaming unaffected); native-FP4 quality unvalidated (numbers = Ampere W4A16 bound). NATIVE FP4 (sm_90+) UNVALIDATED — there the silicon quantizes activations too (true W4A4; family is activation-quant-sensitive), so the native quality number is the arc's missing datapoint. Ships real calibrated k/v scale tensors (nvidia's export ships none) and they LOAD (in-worker verified 2026-07-11 on the 27B sibling); measured effect vs scale=1.0 on this family: none (27B A/B quality/NIAH tie). mtp.* head shipped unquantized but OFF (net-negative on this MoE at TP=2). On Ampere, pick the AutoRound tier unless you specifically want the NVFP4 artifact. No DEFAULTS row (opt-in only).",
+    ),
+
+    # Qwen-AgentWorld-35B-A3B — Qwen's specialized language world model for
+    # predicting environment state after an agent action. Same Qwen3-Next MoE
+    # geometry as qwen3.6-35b-a3b, but language-only and MTP-stripped despite
+    # inherited multimodal/MTP config fields. FP8-E4M3 KV production path with
+    # four full-context serving slots; full operational + behavioral gates passed.
+    "vllm/qwen-agentworld-35b-a3b-dual-awq-int4": _entry(
+        model="qwen-agentworld-35b-a3b", weights_variant="cyankiwi-awq-int4",
+        workload="multi-stream-tenant",
+        engine="vllm-stable", drafter=None, kv_format="fp8_e4m3",
+        tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
+        compose_path="models/qwen-agentworld-35b-a3b/vllm/compose/dual/cyankiwi-awq-int4/fp8.yml",
+        default_port=8080,
+        kvcalc_key="qwen-agentworld-35b-a3b:dual",
+        status="production",
+        status_note="Qwen-AgentWorld-35B-A3B language world model, cyankiwi AWQ INT4 compressed-tensors, dual TP=2 at 262K with FP8-E4M3 KV and four serving slots. PRODUCTION gate on 2x3090, stock vLLM v0.25.1: verify-full PASS; verify-stress 8/8 with exact recall through 240,634 tokens (91%); canonical decode 147.12 narrative / 147.24 code TPS, prefill 5,116 @10K / 3,788 @90K; 100-turn soak PASS with 0 errors, 0 silent outputs, 0 MiB growth, p50 147.61 TPS, and 100% retention. The 1,795,289-token KV pool projects 6.85 full-length sequences; C=4 was exercised for six rounds with four simultaneous ~261,529-token prompts: 24/24 completed, 0 errors, 0 silent outputs, 0 MiB growth, 100% retention. FP8 quick quality scored ToolCall 14/15 and InstructFollow 15/15 thinking ON; the matched BF16 baseline full 8-pack scored 125/150 ON vs 101/150 OFF. Checkpoint is language-only (--language-model-only) and has zero mtp.* tensors, so vision and speculation stay off. No DEFAULTS or recommended-model promotion.",
     ),
 
     # Agents-A1 — InternScience's 35B agentic MoE (Qwen3-Next MoE arch, OWN model
@@ -980,6 +1029,104 @@ COMPOSE_REGISTRY = {
     # First EXTERNAL-MTP compose in the catalog: the nextn head ships as a SEPARATE
     # GGUF (mtp-Tess-*.gguf), engaged via --spec-draft-model + --spec-type draft-mtp
     # (contrast Deckard's embedded head). kv_format q4_0 (K+V). kvcalc SKIP.
+    # ── DeepSeek-V4-Flash-0731 (284B MoE) — the catalog's first CPU-OFFLOAD slugs.
+    # 137 GiB of routed experts live in HOST RAM; a few bundles are pinned back onto
+    # the GPUs (residency) and the rules are INJECTED by the launcher from detected
+    # free VRAM, never hardcoded. kvcalc SKIP (hybrid MoE + MLA — the calculator has
+    # no model for it). required_sm 8.6 so 3090/4090/5090 all qualify; the 4090/5090
+    # paths are INFERRED from the image's arch list, never booted here.
+    # No DEFAULTS row on purpose: incubating is excluded from the curated walk.
+    "llamacpp-club3090/deepseek-flash-multi4-q8-moecache": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llamacpp-club3090", drafter="dspark", kv_format="fp16",
+        tp=4, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llamacpp-club3090/compose/multi4/unsloth-q8-kxl/moecache.yml",
+        weights_companions=("dspark",),
+        default_port=8032,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        moe_cache=True,
+        host_ram_gb=146,
+        required_sm=8.6,
+        status="experimental",
+        status_note="4-card sibling of the dual moe-cache slug. ⚠️ NOT VALIDATED ON ANY RIG — the reference rig has 2 cards, so nothing here has been booted; it ships on the same basis as the stock multi4 slug (off-rig provenance). ⚠️⚠️ THE TUNING IS INHERITED, NOT DERIVED: RESERVE_MB=1536 and -ub 2048 were measured on 2x24 GB against a MEASURED 1,128 MiB compute-buffer swing. On 4 cards the per-card free VRAM, the swing, and the pool/compute balance all differ, and the knee is SHARP (on 2x24 GB the neighbouring reserve value was ~11% slower). Re-derive before trusting: boot with -lv 4 + GGML_CUDA_MOE_CACHE_STATS=50, read the compute-buffer swing, set RESERVE above it, then sweep on WALL-CLOCK (never on hit rate — three times on this stack a config improved every cache counter and got slower). The launch-compat layer raises MOE_RESERVE_MB on cards >24 GB via _moe_cache_env, which covers capacity but not topology. ⚠️ ATTRIBUTION: the expert cache is leloch's work (RFC ggml-org#24528), unmerged in mainline. ⚠️ QUALITY UNTESTED on any topology. Do NOT set GGML_OP_OFFLOAD_MIN_BATCH — at 2 it silently stops the cache allocating (4.2x throughput loss, measured).",
+        category="frontier",
+    ),
+    "llamacpp-club3090/deepseek-flash-dual-q8-moecache": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llamacpp-club3090", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llamacpp-club3090/compose/dual/unsloth-q8-kxl/moecache.yml",
+        # Same hard requirement as the stock sibling: the compose passes -md and
+        # will not boot without the drafter, so readiness must gate on it (#912).
+        weights_companions=("dspark",),
+        default_port=8030,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        # Load-bearing: gates the launch-compat MOE_RESERVE_MB injection
+        # (_moe_cache_env). Without it a 96 GB card inherits a 24 GB reserve.
+        moe_cache=True,
+        host_ram_gb=146,
+        required_sm=8.6,
+        status="experimental",
+        status_note="The stock Q8 slug keeps a 10.4 GiB DSpark drafter on the GPU and caches nothing, idling ~9.3 GB of VRAM. This reallocates that: drafter to host (-devd none), ~5,159 experts (~47% of 11,008) resident in VRAM via leloch's expert cache. Measured 2026-08-10, same session vs the stock slug, canonical prompts at temp 0: decode 18.34 -> 23.64 narrative and 23.51 -> 27.01 code (~+29%/+15%), prefill 436 -> ~355 @10K (~-19%), cache hit rate ~56%. The published IMAGE runs ~4% under the local binary (CUDA 12.8 vs 13.2) -- image numbers are the honest ones. ⚠️ ATTRIBUTION: the expert cache is leloch's work (RFC ggml-org#24528), unmerged in mainline; this slug packages it. ⚠️ EXPERIMENTAL: QUALITY IS UNTESTED -- no 8-pack has been run, and both the cache and the CPU drafter sit on the generation path; no soak, no 3-boot. ⚠️ COLD-START TAX: the first request after boot is slow (~50-75 s for 900 tok) while the pool fills -- never benchmark request 1. ⚠️ Tuning is 2x24 GB specific (RESERVE_MB=1536 from a measured 1,128 MiB compute-buffer swing; 1024 was ~11% SLOWER despite a bigger pool and higher hit rate). Do NOT set GGML_OP_OFFLOAD_MIN_BATCH: at 2 it silently stops the cache allocating and costs 4.2x throughput.",
+        category="frontier",
+    ),
+    "llamacpp/deepseek-flash-dual-q8": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-q8-kxl/offload.yml",
+        # DSpark is REQUIRED, not optional -- the compose passes -md and will not
+        # boot without it, so readiness must gate on it (c3 Start would serve-fail).
+        weights_companions=("dspark",),  # DSpark draft GGUF the compose mounts
+        default_port=8030,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        host_ram_gb=146,
+        required_sm=8.6,
+        status="incubating",
+        status_note="A 284B MoE on 2x24 GB. QUALITY TIER of the two DeepSeek-Flash offload slugs. Stock upstream b10236, zero patches. Three levers compose: CPU expert offload (137 GiB of routed experts in host RAM) + partial residency (bundles pinned back onto the GPUs, sized by the launcher from DETECTED free VRAM) + the DSpark drafter. HARD GATE: ~146 GB host RAM worst case -- preflight REFUSES below it. Ships 200K, NOT 262K: at 262K with the drafter it boots READY at 97.4% VRAM, passes a trivial decode, then dies on a ~15.7K-token prefill (CUDA OOM in cuMemCreate, reproduced 2026-08-06). CANONICAL BENCH PUBLISHED 2026-08-09 (BENCHMARKS.md row 2, reference 2x3090, 3-boot medians): decode 17.1 narrative / 26.9 code at canonical sampling, prefill 369 @10K / 287 @90K, TTFT 169 ms; greedy-replay 35.2. The 8-pack is still owed -- stays incubating until quality lands.",
+        category="frontier",
+    ),
+
+    "llamacpp/deepseek-flash-dual-iq2": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-iq2-xxs", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-iq2-xxs/offload.yml",
+        # DSpark is REQUIRED, not optional -- the compose passes -md and will not
+        # boot without it, so readiness must gate on it (c3 Start would serve-fail).
+        weights_companions=("dspark",),  # DSpark draft GGUF the compose mounts
+        default_port=8031,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        host_ram_gb=86,
+        required_sm=8.6,
+        status="incubating",
+        status_note="REACH TIER of the two DeepSeek-Flash offload slugs: ~86 GB host RAM worst case vs the Q8 tier's ~146 GB, which is what makes a 284B model fit a constrained box. Stock upstream b10236, zero patches; same three levers (offload + launcher-sized residency + DSpark). ~2.6-bit experts. Scoped to dual 24 GB by design. CANONICAL BENCH PUBLISHED 2026-08-09 (BENCHMARKS.md row 3, reference 2x3090): decode 15.4 narrative / 24.3 code at canonical sampling, prefill 436 @10K / 311 @90K -- decode ~10% SLOWER than Q8 (lower draft acceptance on 2.6-bit experts); this tier's case is the RAM gate and prefill, not decode. The 8-pack is still owed, and quality is the open question on a quant this low -- stays incubating. FIRST COMMUNITY VALIDATION: 2x5090 + 123 GB (#931) -- asymmetric 7+8 residency, prefill-90K x3 clean, NIAH ladder to 188K, soak-stable VRAM; that pair of runs is the calibration source for the additive auto-sizer.",
+        category="frontier",
+    ),
+
+    # multi4: AUTHORED HERE, VALIDATED ELSEWHERE. We have 2 cards.
+    "llamacpp/deepseek-flash-multi4-q8": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=4, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/multi4/unsloth-q8-kxl/offload.yml",
+        # DSpark is REQUIRED, not optional -- the compose passes -md and will not
+        # boot without it, so readiness must gate on it (c3 Start would serve-fail).
+        weights_companions=("dspark",),  # DSpark draft GGUF the compose mounts
+        default_port=8032,
+        kvcalc_key="SKIP",
+        offload="n-cpu-moe",
+        host_ram_gb=120,
+        required_sm=8.6,
+        status="incubating",
+        status_note="4-card QUALITY tier. NEVER BOOTED BY US. 2026-08-07: a 4x3090 + 128 GB owner (@milano, Discord) BOOTED it after correcting two constants this compose had COPIED from the dual file and never re-derived for four cards -- reserve 18000 (a 2-way dense split) granted 1 bundle/card where 2 fit, and the 146 GB gate then REFUSED the 128 GB box this slug exists to serve. Reserve now 14500 (additive #931 recalibration; the interim x0.55-era value was 12000); host_ram_gb=120 HERE is the nominal 4x24 figure (what the catalog displays -- @milano measured it), while the COMPOSE HEADER carries the 146 all-experts-on-CPU worst case and preflight computes the rig-specific need by subtracting detected residency (~121 at 4x24; 4x16 GB fits zero bundles and correctly gates at ~146). The mismatch is deliberate -- do not 'fix' either number to match the other. STILL UNVALIDATED BEYOND BOOT: no real prefill probe yet, and on this model boot is NOT sufficient -- the 262K config booted, passed a trivial decode, then died on the first ~15.7K prefill. Prefill probe requested. The argument is NOT throughput: every layer pinned to a GPU is a layer NOT in host RAM, so host RAM FALLS with card count -- **120 GB MEASURED** at 4x24 GB (was ~113 est.) vs ~146 at 2x24 -- first 4-card boot by @milano 2026-08-07. 128 GB is a very common host config, which the 2-card Q8 slug EXCLUDES and this one FITS, so multi4 is what puts the quality tier inside a mainstream RAM budget. Residency should also be at its best here (~23% of expert traffic on GPU vs 4.7% on two cards). No IQ2 multi slug: on four cards Q8 itself drops into a 128 GB budget, so a low-bit tier is not needed to fit.",
+        category="frontier",
+    ),
+
     "llamacpp/tess-dual-mtp": _entry(
         model="tess-4-27b", weights_variant="migtissera-q4km", workload="fast-chat",
         engine="llama-cpp-local", drafter="tess-mtp-gguf", kv_format="q4_0",
@@ -1016,7 +1163,7 @@ COMPOSE_REGISTRY = {
         default_port=8083, fallback_sm=7.5,
         kvcalc_key="SKIP",
         status="caveats",
-        status_note="Tess-4-27B AutoRound W4A16 (LeaderboardModel1; sym INT4 g128, mtp.fc@BF16) at TP=2 @262K + fp8_e4m3 KV + built-in MTP n=5 — THE FASTEST TESS on 2x24GB and the MTP-revival result (club #662): 73.5 narrative / 108.2 code tok/s decode (vs the NVFP4 sibling's spec-off 62.4), accept-len 5.0 / 80% warm. Native Marlin WNA16 on Ampere. rebench-full 2026-07-17 (131 min): verify-stress 8/8 incl. NIAH ceiling ladder to 0.92x262K (2.2 GB margin), soak PASS (0/100 silent-empty, p50 110.6, 105% retention), 8-pack 108/150 off / 115/150 on — beats the NVFP4 A0 baseline (106/113) on BOTH legs. CAVEAT (why not full production): think-OFF still undershoots the GGUF tier bar (108 vs 116, cli-40-concentrated 19/40 vs 25/40); think-ON ties (115 vs 117, cli-40 25/40 = parity) — same precision-not-serving-path gap as the NVFP4 arms. n-sweep (single-variable): no-spec 70.1/70.0, n=5 69.9/104.3 (knee), n=6/8 regress. Prefix caching OFF (hybrid DeltaNet state). Froggeric template pinned. SPEC_N overridable; the head is NOT valid on the NVFP4 slug (dead there - export, not head).",
+        status_note="Tess-4-27B AutoRound W4A16 (LeaderboardModel1; sym INT4 g128, mtp.fc@BF16) at TP=2 @262K + fp8_e4m3 KV + built-in MTP n=5 — THE FASTEST TESS on 2x24GB and the MTP-revival result (club #662): 73.5 narrative / 108.2 code tok/s decode (vs the NVFP4 sibling's spec-off 62.4), accept-len 5.0 / 80% warm. Native Marlin WNA16 on Ampere. rebench-full 2026-07-17 (131 min): verify-stress 8/8 incl. NIAH ceiling ladder to 0.92x262K (2.2 GB margin), soak PASS (0/100 silent-empty, p50 110.6, 105% retention), 8-pack 108/150 off / 115/150 on — beats the NVFP4 A0 baseline (106/113) on BOTH legs. CAVEAT (why not full production): think-OFF still undershoots the GGUF tier bar (108 vs 116, cli-40-concentrated 19/40 vs 25/40); think-ON ties (115 vs 117, cli-40 25/40 = parity) — same precision-not-serving-path gap as the NVFP4 arms. n-sweep (single-variable): no-spec 70.1/70.0, n=5 69.9/104.3 (knee), n=6/8 regress. Prefix caching OFF (hybrid DeltaNet state). Froggeric template pinned. ⚠️ SPEC_N DEFAULT LOWERED 5→3 on 2026-07-31 (PRECAUTIONARY): the architecturally-identical ThinkingCap (same qwen35-dense family, same mtp.fc@BF16 head) crashes the engine at n>=4 on 3 rigs (#758); Tess has NO reported crashes, so this is prophylactic, not evidence of a Tess fault. All TPS above are n=5-measured; n=3 is unbenched. SPEC_N=5 restores the benched config. SPEC_N overridable; the head is NOT valid on the NVFP4 slug (dead there - export, not head).",
     ),
 
     # ThinkingCap-Qwen3.6-27B AutoRound W4A16, served W4A8 (int8 activations via 2 vendored
@@ -1033,7 +1180,7 @@ COMPOSE_REGISTRY = {
         default_port=8099, fallback_sm=7.5,
         kvcalc_key="SKIP",
         status="caveats",
-        status_note="ThinkingCap-Qwen3.6-27B AutoRound W4A16 (LeaderboardModel1; sym INT4 g128, mtp.fc@BF16 working head) served W4A8 — int8 activations via VLLM_MARLIN_INPUT_DTYPE=int8 + 2 vendored patches (patches/w4a8: INC input_dtype + negative-scale fold; AutoRound emits ~50% negative scales, folded at boot). Same qwen35-dense hybrid (48 linear + 16 full attn) + built-in MTP n=5 as Tess. TP=2 @262K + fp8_e4m3 KV. rebench-full 2026-07-21 (thinkingcap-27b-20260721-0758): 73.3 narrative / 106.1 code tok/s (MTP accept 5.0/80%), verify-stress boundary 8/8 (NIAH clean to 240K), soak PASS (0/100 silent-empty, p50 119.75 decode), 8-pack 113/150 off / 120/150 on — TOPS Tess W4A16 (108/115) and Qwen fast-tier (109) on BOTH legs (esp. reasoning: IF 15/15 + BugFind 15/15 think-on). n-sweep knee n=5 (code +64% 65->107; n=6/8 regress). CAVEAT (why caveats not production): THIN 69 MB VRAM margin at the 262K ceiling with MTP (MTP eats ~1.2 GB headroom; no-MTP ladder had 1245 MB) — NIAH recall is clean to 240K but sustained agents at MAX ctx should size below 262K or lower util. Vision tower resident but untested (text-only validated). Single-card W4A8 tops ~76K (vision-limited). Native template works (no froggeric pin needed). SPEC_N overridable.",
+        status_note="ThinkingCap-Qwen3.6-27B AutoRound W4A16 (LeaderboardModel1; sym INT4 g128, mtp.fc@BF16 working head) served W4A8 — int8 activations via VLLM_MARLIN_INPUT_DTYPE=int8 + 2 vendored patches (patches/w4a8: INC input_dtype + negative-scale fold; AutoRound emits ~50% negative scales, folded at boot). Same qwen35-dense hybrid (48 linear + 16 full attn) + built-in MTP as Tess (DEFAULT n=3 since 2026-07-31; all TPS below were benched at n=5). TP=2 @262K + fp8_e4m3 KV. rebench-full 2026-07-21 (thinkingcap-27b-20260721-0758): 73.3 narrative / 106.1 code tok/s (MTP accept 5.0/80%), verify-stress boundary 8/8 (NIAH clean to 240K), soak PASS (0/100 silent-empty, p50 119.75 decode), 8-pack 113/150 off / 120/150 on — TOPS Tess W4A16 (108/115) and Qwen fast-tier (109) on BOTH legs (esp. reasoning: IF 15/15 + BugFind 15/15 think-on). n-sweep knee n=5 (code +64% 65->107; n=6/8 regress). CAVEAT (why caveats not production): ⚠️ MTP n>=4 CRASHES the engine under sustained multi-turn load (#758) — drafter intermittently emits all-`-1` draft token IDs → out-of-bounds embedding gather → cudaErrorIllegalAddress → dead worker; depth- and VRAM-independent (seen ~25K after a clean 240K prefill; lowering util and max-model-len both changed nothing); n=5 dies within 1-2 sessions, n=4 eventually, n=3/n=0 stable; hit on 3 rigs incl. 2x 5090. Default lowered 5→3; n=3 is UNBENCHED on the reference rig. Also THIN 69 MB VRAM margin at the 262K ceiling with MTP (MTP eats ~1.2 GB headroom; no-MTP ladder had 1245 MB) — NIAH recall is clean to 240K but sustained agents at MAX ctx should size below 262K or lower util. Vision tower resident but untested (text-only validated). Single-card W4A8 tops ~76K (vision-limited). Native template works (no froggeric pin needed). SPEC_N overridable.",
     ),
 
     # Nemotron-3 Puzzle 75B-A9B NVFP4 — hybrid Mamba2-Transformer LatentMoE (512 routed
@@ -1070,7 +1217,7 @@ COMPOSE_REGISTRY = {
         default_port=8096, required_sm=7.5, fallback_sm=7.5,
         kvcalc_key="SKIP",
         status="experimental",
-        status_note="Nemotron-3 Puzzle 75B-A9B W4A16 (danielrmay compressed-tensors: INT4 routed experts / INT8 shared+mamba / BF16 attn+latent+router+embed+lm_head), 2-card TP=2 + expert-parallel @262K, N=4. The 2-CARD SIBLING of vllm/nemotron-75b-multi-mtp — HALVES the hardware (41.48 GB / 11 shards, ~21.3 GiB/card fits 2x24GB; NVFP4's 53.5 GB is TP=4-only). Mamba2-Transformer hybrid LatentMoE, 9.3B active / 75.3B total. MTP-STRIPPED (config declares num_nextn_predict_layers=1 but 0 mtp.* weights → drafter-free; enabling mtp = ~0% accept). 🧪 Experimental — validated on the SUBMITTER's 2x3090 (@MIkamal88, #719): correctness (847*293, 'all but 9'), RULER 10/10 to 195K, decode/prefill/concurrency, benchlocal 8-pack 100/150 (think-on, t=1.0) / medium 65/75 (t=0.3), AND the maintainer reference 2x3090 (verify-full pass, verify-stress 7/8 with NIAH to 240K/91%, soak-continuous PASS: 0 growth / 0-of-25 silent-empty / p50 73, canonical bench 45.8/49.0 narr-code think-off); held experimental pending a behavioral re-run (the 8-pack is verifier-depressed: 42 of 46 misses were grader-side verifier_fail; re-run after the benchlocal-cli verifier-fidelity release #95/#89/#81). Three Ampere levers make it fit on 24 GB (the card's 0.97 recipe is simulated on 48 GB A6000 clamps): int8_per_token_head KV + TRITON_ATTN (workspace-free; fp8 KV is FlashInfer-only on sm_86 → 394 MiB workspace → OOM), PIECEWISE CUDA graphs [1,2,4] (27.9 eager → ~88 tok/s; capture_sizes MUST cover N=4 or N≥3 silently → eager), and the GC allocator (garbage_collection_threshold:0.6,max_split_size_mb:128 reclaims ~1.07 GiB fragmentation expandable_segments can't on this hybrid+EP pattern). Ships custom-AR OFF (stock-driver: PCIe branch of detect_nvlink disables it; +330 MiB/card floor); custom-AR ON via aikitoria BAR1-P2P + GC allocator = +6-8% opt-in. Measured AR-off (real 2x3090, full 262K, N=4): N=1 87.3 tok/s, N=4 240.7 agg (64.7/stream), TTFT p50 0.61s, floor 347/365 MiB, KV pool ~278K tokens, 0 preempt/OOM. Submitter measured on cu129-nightly dev1060; maintainer booted + gated on v0.24.0 (arch registered) via VLLM_IMAGE override, then bumped the compose image v0.24.0->v0.25.1 2026-07-21 (image-drift fix — matches the vllm-stable engine + the NVFP4 multi4 sibling; smoke-boot re-confirmed the W4A16 dual path boots coherent on v0.25.1). kvcalc SKIP (hybrid, model kv_calc_supported=false). dataextract is the one soft 8-pack spot — all 6 misses were verifier_fail (grader-side), so model-trait-OR-grader-strictness (quant-independent: same scenarios as 4xNVFP4 #706), TBD on the re-run. No DEFAULTS row (opt-in only).",
+        status_note="Nemotron-3 Puzzle 75B-A9B W4A16 (danielrmay compressed-tensors: INT4 routed experts / INT8 shared+mamba / BF16 attn+latent+router+embed+lm_head), 2-card TP=2 + expert-parallel @262K, N=4. The 2-CARD SIBLING of vllm/nemotron-75b-multi-mtp — HALVES the hardware (41.48 GB / 11 shards, ~21.3 GiB/card fits 2x24GB; NVFP4's 53.5 GB is TP=4-only). Mamba2-Transformer hybrid LatentMoE, 9.3B active / 75.3B total. MTP-STRIPPED (config declares num_nextn_predict_layers=1 but 0 mtp.* weights → drafter-free; enabling mtp = ~0% accept). 🧪 Experimental — validated on the SUBMITTER's 2x3090 (@MIkamal88, #719): correctness (847*293, 'all but 9'), RULER 10/10 to 195K, decode/prefill/concurrency, benchlocal 8-pack 100/150 (think-on, t=1.0) / medium 65/75 (t=0.3), AND the maintainer reference 2x3090 (verify-full pass, verify-stress 7/8 with NIAH to 240K/91%, soak-continuous PASS: 0 growth / 0-of-25 silent-empty / p50 73, canonical bench 45.8/49.0 narr-code think-off); held experimental pending a behavioral re-run (the 8-pack is verifier-depressed: 42 of 46 misses were grader-side verifier_fail; re-run after the benchlocal-cli verifier-fidelity release #95/#89/#81). Three Ampere levers make it fit on 24 GB (the card's 0.97 recipe is simulated on 48 GB A6000 clamps): int8_per_token_head KV + TRITON_ATTN (workspace-free; fp8 KV is FlashInfer-only on sm_86 → 394 MiB workspace → OOM), PIECEWISE CUDA graphs [1,2,4] (27.9 eager → ~88 tok/s; capture_sizes MUST cover N=4 or N≥3 silently → eager), and the GC allocator (garbage_collection_threshold:0.6,max_split_size_mb:128 reclaims ~1.07 GiB fragmentation expandable_segments can't on this hybrid+EP pattern). Ships custom-AR OFF (stock-driver: PCIe branch of detect_nvlink disables it; +330 MiB/card floor); custom-AR ON via aikitoria BAR1-P2P + GC allocator = +6-8% opt-in. Measured AR-off (real 2x3090, full 262K, N=4): N=1 87.3 tok/s, N=4 240.7 agg (64.7/stream), TTFT p50 0.61s, floor 347/365 MiB, KV pool ~278K tokens, 0 preempt/OOM. Submitter measured on cu129-nightly dev1060; maintainer booted + gated on v0.24.0 (arch registered) via VLLM_IMAGE override, then bumped the compose image v0.24.0->v0.25.1 2026-07-21 (image-drift fix — matches the vllm-stable engine + the NVFP4 multi4 sibling; smoke-boot re-confirmed the W4A16 dual path boots coherent on v0.25.1). FIRST BLACKWELL / 32 GB-CLASS VALIDATION 2026-08-02 (#859 @paulp83, 2x 5090, no power cap): verify-stress 6/6 to 240K (91%) with free VRAM 7,191 -> 7,183 MB (delta -8 MB across the whole ladder), soak-continuous PASS, decode 149.9/150.2 TPS (n=5, CV 0.4%/0.2%), TTFT 49/47 ms, prefill 7,700 @10K / 4,628 @90K, 24,826/24,389 MiB per card -- roughly 3.3x the 2x3090 numbers on the identical compose. 8-pack 101/150 think-off / 118/150 think-on (v0.9.8) -- read think-ON: this compose ships enable_thinking=True + the nemotron_v3 reasoning parser, so thinking-off is off-design here (+17 is the largest thinking delta in BENCHMARKS). WATCH-ITEM from that run: the shipped KV_CACHE_MEMORY_BYTES=820000000 pin is tuned for 24 GB cards and becomes the binding constraint on 32 GB ones -- he finishes the 240K ladder with 7.2 GB/card still free at a 337,042-token pool (1.29x concurrency). Raising the pin on >=32 GB cards is untested; flagged, not changed. kvcalc SKIP (hybrid, model kv_calc_supported=false). dataextract is the one soft 8-pack spot — all 6 misses were verifier_fail (grader-side), so model-trait-OR-grader-strictness (quant-independent: same scenarios as 4xNVFP4 #706), TBD on the re-run. No DEFAULTS row (opt-in only).",
     ),
 
     # Ornith-1.0-9B — DeepReinforce agentic-coding RL fine-tune. Qwen3-Next DENSE-FFN
@@ -1134,11 +1281,9 @@ DEFAULTS = {
     ("qwen3.6-27b", "vllm", "dual"): "vllm/dual",
     ("qwen3.6-27b", "llamacpp", "single"): "llamacpp/default",
     ("qwen3.6-27b", "ik-llama", "single"): "ik-llama/iq4ks-mtp",
-    ("qwen3.6-27b", "beellama", "single"): "beellama/dflash",
     # No vLLM single-card Gemma default: fp8 KV is hardware-impossible on Ampere
     # sm_86 (vllm/gemma-mtp-tp1 deprecated 2026-05-31) and no bf16 single compose
     # ships. Single-card Gemma → beellama/gemma-dflash (the curated walk picks it).
-    ("gemma-4-31b", "beellama", "single"): "beellama/gemma-dflash",
     # Dual default is gemma-31b-dual: cyankiwi bf16 @224K on STOCK vLLM v0.24.0, OVERLAY-FREE
     # (⚠️ Production w/ caveats, validated 2026-07-02 — verify-full 9/9 + verify-stress to 210K with
     # healthy VRAM margin + soak PASS). Supersedes the v0.22.0 gemma-int8-mtp (int8-PTH+#40391, 262K),
@@ -1192,10 +1337,14 @@ RECOMMENDED_DEFAULT_MODELS = ["qwen3.6-27b", "gemma-4-31b"]
 # upstream Docker image — see docs/UPSTREAM.md). The resolver skips it
 # naturally (no DEFAULTS hit) → no behavior change until it is onboarded, at
 # which point it AUTO-PROMOTES to the single-GPU default with no resolver edit.
+# beellama removed from every walk 2026-07-27: the engine is retired (all 10
+# slugs deprecated — Anbeeld #98 won't-fix upstream DFlash VRAM regression;
+# pin v0.3.2-preview unmaintained). Slugs stay launchable by name with --force.
+# Re-add if the llama-cpp-mainline migration ever revives a beellama build.
 ENGINE_PREFERENCE = {
-    "single": ["beellama", "ik-llama", "llamacpp", "vllm"],
-    "dual": ["vllm", "ik-llama", "llamacpp", "beellama"],
-    "multi": ["vllm", "ik-llama", "llamacpp", "beellama"],
+    "single": ["ik-llama", "llamacpp", "vllm"],
+    "dual": ["vllm", "ik-llama", "llamacpp"],
+    "multi": ["vllm", "ik-llama", "llamacpp"],
 }
 
 

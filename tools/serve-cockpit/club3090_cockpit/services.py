@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
@@ -44,7 +45,7 @@ from club3090_tui_core.detect import (
     match_target_to_registry,
 )
 from club3090_tui_core.registry import VariantRow, parse_variant_rows
-from club3090_tui_core.runner import SubprocessRunner
+from club3090_tui_core.runner import CoreRunState, SubprocessRunner
 
 from .data import (
     ActionPlan,
@@ -227,9 +228,13 @@ class Runner(Protocol):
 class RealRunner:
     """Production runner — actually shells out (READ contracts only)."""
 
+    def __init__(self, *, logging_enabled: bool = False):
+        self.logging_enabled = logging_enabled
+
     async def run(
         self, cmd: list[str], *, cwd: str, timeout: float = 30.0
     ) -> RunResult:
+        log = ReadLog(cmd) if self.logging_enabled else None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -238,17 +243,20 @@ class RealRunner:
                 stderr=asyncio.subprocess.PIPE,
             )
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return RunResult(
+            result = RunResult(
                 returncode=proc.returncode if proc.returncode is not None else -1,
                 stdout=out.decode("utf-8", errors="replace"),
                 stderr=err.decode("utf-8", errors="replace"),
             )
         except asyncio.TimeoutError:
-            return RunResult(returncode=-1, stdout="", stderr="timeout", timed_out=True)
+            result = RunResult(returncode=-1, stdout="", stderr="timeout", timed_out=True)
         except FileNotFoundError as exc:
-            return RunResult(returncode=127, stdout="", stderr=str(exc))
+            result = RunResult(returncode=127, stdout="", stderr=str(exc))
         except Exception as exc:  # pragma: no cover - defensive
-            return RunResult(returncode=-1, stdout="", stderr=str(exc))
+            result = RunResult(returncode=-1, stdout="", stderr=str(exc))
+        if log is not None:
+            log.complete_result(result)
+        return result
 
 
 # Detect seam: async callables matching the core signatures.
@@ -260,6 +268,135 @@ ProbeServedFn = Callable[[Any], Awaitable["ServedProbe"]]
 
 
 # ── The service class ───────────────────────────────────────────────────────────
+
+
+class RunLog:
+    """Persistent subprocess log — ``<config>/logs/c3-<category>-<ts>-<kind>.log``.
+
+    Best-effort everywhere — a failed write must never break the underlying
+    action.  The child ENV is never logged (it carries HF_TOKEN); the argv is
+    safe to log.  ``DownloadLog`` below keeps the #793 always-on behavior while
+    general runs are constructed only when the master logging switch is on.
+    """
+
+    KEEP = 30  # newest logs retained; older pruned at construction
+    LOG_SUCCESS_OUTPUT = True
+
+    def __init__(self, kind: str, cmd: list[str], *, category: str = "run"):
+        self.path: Optional[Path] = None
+        self._fh = None
+        self.category = category
+        try:
+            base = os.environ.get("C3_CONFIG_DIR")
+            d = (Path(base) if base else Path.home() / ".config" / "club-3090") / "logs"
+            d.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", kind).strip("-") or category
+            self.path = d / f"c3-{category}-{ts}-{slug}.log"
+            self._fh = self.path.open("a", encoding="utf-8")
+            self._fh.write(f"# c3 {category} log · kind={kind} · started {ts}\n")
+            self._fh.write(f"# cmd: {' '.join(map(str, cmd))}\n")
+            self._fh.flush()
+            self._prune(d)
+        except OSError:
+            self.path = None
+            self._fh = None
+
+    def _prune(self, d: Path) -> None:
+        try:
+            logs = sorted(
+                d.glob(f"c3-{self.category}-*.log"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for old in logs[: max(0, len(logs) - self.KEEP)]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def line(self, s: str) -> None:
+        if self._fh is None:
+            return
+        try:
+            self._fh.write(s.rstrip("\n") + "\n")
+            self._fh.flush()
+        except (OSError, ValueError):
+            self._fh = None
+
+    def complete(self, state) -> None:
+        """Footer from the run state (also fired by the runner's on_complete)."""
+        if self._fh is None:
+            return
+        try:
+            err = getattr(state, "error", "") or ""
+            self._fh.write(
+                f"# done · exit={getattr(state, 'exit_code', None)} · "
+                f"verdict={getattr(state, 'verdict', '')}"
+                + (f" · error={err}" if err else "")
+                + "\n"
+            )
+            self._fh.close()
+        except (OSError, ValueError):
+            pass
+        self._fh = None
+
+    def complete_result(self, result: RunResult) -> None:
+        """Footer for a read runner, with noisy output only when it is useful."""
+        if self._fh is None:
+            return
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        parseable_json = False
+        if self.LOG_SUCCESS_OUTPUT and result.ok and stdout.strip():
+            try:
+                json.loads(stdout)
+                parseable_json = True
+            except (TypeError, ValueError):
+                pass
+        try:
+            nonparseable_output = bool(stderr.strip()) or bool(
+                stdout.strip() and not parseable_json
+            )
+            if not result.ok or (self.LOG_SUCCESS_OUTPUT and nonparseable_output):
+                if stdout:
+                    self._fh.write("# stdout\n")
+                    self._fh.write(stdout.rstrip("\n") + "\n")
+                if stderr:
+                    self._fh.write("# stderr\n")
+                    self._fh.write(stderr.rstrip("\n") + "\n")
+            self._fh.write(
+                f"# done · exit={result.returncode} · "
+                f"verdict={'passed' if result.ok else 'failed'}"
+                + (" · error=timeout" if result.timed_out else "")
+                + "\n"
+            )
+            self._fh.close()
+        except (OSError, ValueError):
+            pass
+        self._fh = None
+
+
+class ReadLog(RunLog):
+    """High-churn read record pool, isolated from actionable write logs.
+
+    Healthy poll bodies are intentionally omitted: argv + exit status retain
+    the audit record without repeatedly dumping df/meminfo/nvidia-smi output.
+    Failures still include stdout/stderr through ``RunLog.complete_result``.
+    """
+
+    KEEP = 100
+    LOG_SUCCESS_OUTPUT = False
+
+    def __init__(self, cmd: list[str]):
+        super().__init__("read", cmd, category="read")
+
+
+class DownloadLog(RunLog):
+    """Always-on #793 download log; intentionally outside the master switch."""
+
+    KEEP = 30
+
+    def __init__(self, kind: str, cmd: list[str]):
+        super().__init__(kind, cmd, category="download")
 
 
 class CockpitData:
@@ -304,6 +441,7 @@ class CockpitData:
         # on each ``load_catalog_rows``; empty on the raw-tab fallback path.
         self.catalog_defaults: list[dict] = []
         self._runner: Runner = runner or RealRunner()
+        self._logging_enabled = False
         self._detect_endpoint: DetectEndpointFn = detect_endpoint_fn or core_detect_endpoint
         self._get_gpu_info: GetGpuInfoFn = get_gpu_info_fn or core_get_gpu_info
         # A7: the live-config probe seam.  Defaults to the real httpx + docker
@@ -334,6 +472,73 @@ class CockpitData:
         # own READY_TIMEOUT is already 600s, so a TTL near that would prune a
         # still-booting claim; keep it well above a worst-case boot.
         self._claim_ttl = 1800.0  # seconds
+
+    def set_logging_enabled(self, enabled: bool) -> None:
+        """Apply the master switch to read and non-download write runners."""
+        self._logging_enabled = bool(enabled)
+        if isinstance(self._runner, RealRunner):
+            self._runner.logging_enabled = self._logging_enabled
+
+    async def _start_raw_logged(
+        self,
+        runner: SubprocessRunner,
+        cmd: list[str],
+        *,
+        env: dict,
+        run_type: str,
+        parser: Any,
+        on_event: Optional[Callable[[Any], None]] = None,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Start a non-download stream, teeing it when master logging is on.
+
+        Callback values are never serialized.  In particular, ``env`` is passed
+        to the child only and is intentionally absent from the log.
+        """
+        existing_event = getattr(runner, "_on_event", None)
+        existing_line = getattr(runner, "_on_line", None)
+        existing_complete = getattr(runner, "_on_complete", None)
+        event_cb = on_event if on_event is not None else existing_event
+        line_cb = on_line if on_line is not None else existing_line
+        log = RunLog(run_type, cmd) if self._logging_enabled else None
+
+        def emit(line: str) -> None:
+            if log is not None:
+                log.line(line)
+            if line_cb is not None:
+                line_cb(line)
+
+        def complete(state: Any) -> None:
+            try:
+                if log is not None:
+                    log.complete(state)
+                if existing_complete is not None:
+                    existing_complete(state)
+            finally:
+                # ``SubprocessRunner`` stores callbacks on the runner instance.
+                # Restore the prior set after this asynchronous run finishes so
+                # repeated launches do not build callback/log wrapper chains.
+                runner.set_callbacks(
+                    on_event=existing_event,
+                    on_line=existing_line,
+                    on_complete=existing_complete,
+                )
+
+        if log is not None or on_event is not None or on_line is not None:
+            runner.set_callbacks(
+                on_event=event_cb,
+                on_line=emit if log is not None or line_cb is not None else None,
+                on_complete=complete,
+            )
+        try:
+            return await runner.start_raw(cmd, env=env, run_type=run_type, parser=parser)
+        except Exception:
+            runner.set_callbacks(
+                on_event=existing_event,
+                on_line=existing_line,
+                on_complete=existing_complete,
+            )
+            raise
 
     # ── small JSON helper ──────────────────────────────────────────────────────
 
@@ -506,6 +711,71 @@ class CockpitData:
             except Exception:
                 pass
 
+    # ── Download plumbing: persistent logs + preflight ────────────────────────
+    # 2026-07-27 community triage: a failed download left NOTHING on disk (pane
+    # scrollback only), and a missing `hf` CLI surfaced as an opaque spawn error.
+    # Every download now (a) tees its stream to <config>/logs/ and (b) preflights
+    # its prerequisites with actionable pane lines BEFORE spawning.
+
+    @staticmethod
+    def _c3_config_dir() -> Path:
+        """Mirror __main__.settings_path(): C3_CONFIG_DIR or ~/.config/club-3090."""
+        base = os.environ.get("C3_CONFIG_DIR")
+        return Path(base) if base else Path.home() / ".config" / "club-3090"
+
+    def _hf_cli_present(self) -> bool:
+        """The `hf` CLI every download path shells out to (route-G directly;
+        setup.sh + pull.sh's HubFetcher underneath)."""
+        return bool(shutil.which("hf")) or (
+            Path.home() / ".local" / "bin" / "hf"
+        ).exists()
+
+    def _hf_token_file(self) -> Path:
+        return Path.home() / ".cache" / "huggingface" / "token"
+
+    def download_preflight(self, *, needs_hf_cli: bool = True) -> tuple[list[str], list[str]]:
+        """(blockers, notes) checked BEFORE spawning a download.
+
+        Blockers stop the spawn (the pane gets the fix, not a stack trace);
+        notes are informational and never block.  ``C3_SKIP_DOWNLOAD_PREFLIGHT=1``
+        bypasses both (tests; power users who know their rig)."""
+        if os.environ.get("C3_SKIP_DOWNLOAD_PREFLIGHT") == "1":
+            return [], []
+        blockers: list[str] = []
+        notes: list[str] = []
+        if needs_hf_cli and not self._hf_cli_present():
+            blockers += [
+                "✗ preflight: the Hugging Face CLI ('hf') is not installed — the download can't start.",
+                "  fix: run `bash scripts/setup.sh` once in a terminal (it offers an isolated install),",
+                "  or:  pipx install 'huggingface-hub[hf_transfer]' && pipx ensurepath",
+            ]
+        if not os.environ.get("HF_TOKEN") and not self._hf_token_file().exists():
+            notes.append(
+                "ℹ preflight: no HF token found (env HF_TOKEN / ~/.cache/huggingface/token) — "
+                "gated repos will fail with 401; set one in [S] Settings."
+            )
+        return blockers, notes
+
+    def _preflight_failed_state(self, run_type: str, blockers: list[str]) -> CoreRunState:
+        """A failed CoreRunState WITHOUT spawning — the same shape start_raw
+        returns on a spawn failure, so panes handle it identically."""
+        st = CoreRunState(run_type=run_type, started=time.time())
+        st.finished = time.time()
+        st.exit_code = -1
+        st.verdict = "failed"
+        st.error = blockers[0] if blockers else "preflight failed"
+        st.done.set()
+        return st
+
+    @staticmethod
+    def _tee(on_line: Optional[Callable[[str], None]], log: "DownloadLog") -> Callable[[str], None]:
+        """One emitter: every line goes to the log AND (when set) the pane."""
+        def emit(line: str) -> None:
+            log.line(line)
+            if on_line is not None:
+                on_line(line)
+        return emit
+
     # ── Download (Download UX): fetch a slug's weights via setup.sh ───────────────
 
     def weights_download_plan(self, model: str, variant: str) -> ActionPlan:
@@ -553,8 +823,20 @@ class CockpitData:
         if comp_keys:
             env["WEIGHT_EXTRA_KEYS"] = " ".join(comp_keys)
         env.setdefault("HF_HOME", str(Path(root) / ".cache" / "huggingface"))
-        if on_line is not None:
-            self._download_runner.set_callbacks(on_line=on_line)
+        log = DownloadLog(f"weights-{model}", plan.cmd)
+        emit = self._tee(on_line, log)
+        if log.path:
+            emit(f"[log] {log.path}")
+        blockers, notes = self.download_preflight()
+        for n in notes:
+            emit(n)
+        if blockers:
+            for b in blockers:
+                emit(b)
+            st = self._preflight_failed_state(plan.kind, blockers)
+            log.complete(st)
+            return st
+        self._download_runner.set_callbacks(on_line=emit, on_complete=log.complete)
         return await self._download_runner.start_raw(
             plan.cmd, env=env, run_type=plan.kind, parser=None
         )
@@ -571,8 +853,11 @@ class CockpitData:
         env["MODEL_DIR"] = self.weights_model_dir()
         env["COMFYUI_MODELS_DIR"] = self.comfyui_models_dir()
         env.setdefault("HF_HOME", str(Path(self.weights_model_dir()) / ".cache" / "huggingface"))
-        if on_line is not None:
-            self._download_runner.set_callbacks(on_line=on_line)
+        log = DownloadLog("studio", plan.cmd)
+        emit = self._tee(on_line, log)
+        if log.path:
+            emit(f"[log] {log.path}")
+        self._download_runner.set_callbacks(on_line=emit, on_complete=log.complete)
         return await self._download_runner.start_raw(
             plan.cmd, env=env, run_type=plan.kind, parser=None
         )
@@ -1078,6 +1363,7 @@ class CockpitData:
         env = dict(os.environ)
         env.setdefault("HF_HOME", str(self._bring_hf_home()))
         self._last_swap_compose = ""
+        log = DownloadLog(f"bring-{repo.rsplit('/', 1)[-1]}", ["(bring)", repo])
 
         def _capture(line: str) -> None:
             # Route-C apply-swap prints "[apply-swap] compose: <path>" — capture
@@ -1088,14 +1374,37 @@ class CockpitData:
             if on_line is not None:
                 on_line(line)
 
-        if apply_swap or on_line is not None:
-            self._download_runner.set_callbacks(on_line=_capture)
+        emit = self._tee(_capture, log)
+        if log.path:
+            emit(f"[log] {log.path}")
+        blockers, notes = self.download_preflight()
+        for n in notes:
+            emit(n)
+        if blockers:
+            for b in blockers:
+                emit(b)
+            st = self._preflight_failed_state("download", blockers)
+            log.complete(st)
+            return st
+        self._download_runner.set_callbacks(on_line=emit, on_complete=log.complete)
         if gguf_includes:
             # GGUF bring (route-G): pull.sh is the SAFETENSORS evaluate/download
             # path — it ABORTS `unsupported-format (no config.json)` on a GGUF repo.
-            # So fetch the picked quant's files DIRECTLY into the pull dir with the
-            # same guards as hf-download.sh (classic LFS = resumable; token survives
-            # a non-login shell).  One `--include` per pattern.  (2026-07-09 dogfood.)
+            # So fetch the picked quant's files DIRECTLY into the pull dir.
+            # One `--include` per pattern.  (2026-07-09 dogfood.)
+            #
+            # #804: this used to build a bare `hf download` argv, which inherits
+            # huggingface_hub's hard-coded 50 GB MAX_HTTP_DOWNLOAD_SIZE ceiling on
+            # the classic path — a client-side POLICY refusal, not flakiness, so
+            # retrying is futile. Large monolithic GGUFs are exactly the files that
+            # hit it (laguna-s-2.1-Q4_K_M.gguf, 96 GB, single file), and this funnel
+            # is exactly the path they take. Routed through the #855 module CLI so a
+            # GGUF pull gets the resilience ladder: classic LFS -> opt-in Xet ->
+            # per-attempt re-resolved raw curl, each rung announcing why the
+            # previous failed, and every rung sha256-gated against x-linked-etag.
+            # --verify-in-place adopts an already-correct file on a re-run instead
+            # of re-pulling it (a 96 GB file is not something to re-fetch to learn
+            # it was already fine).
             pull = self.bring_pull_dir(repo)
             env.setdefault("HF_HUB_DISABLE_XET", "1")
             env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
@@ -1107,8 +1416,8 @@ class CockpitData:
                         env["HF_TOKEN"] = tok
                 except OSError:
                     pass
-            hf_bin = shutil.which("hf") or str(Path.home() / ".local" / "bin" / "hf")
-            cmd = [hf_bin, "download", repo, "--local-dir", str(pull)]
+            cmd = ["python3", "scripts/lib/profiles/hf_fetch.py", repo,
+                   "--local-dir", str(pull), "--verify-in-place"]
             for pat in gguf_includes:
                 cmd += ["--include", pat]
         else:
@@ -1122,6 +1431,7 @@ class CockpitData:
                 # compose (do_download=False).  ② Serve uses this so a present-weights
                 # serve needs no [D] step.  Only meaningful alongside --apply-swap.
                 cmd.append("--emit-only")
+        log.line(f"# cmd: {' '.join(map(str, cmd))}")
         return await self._download_runner.start_raw(
             cmd,
             env=env,
@@ -1171,7 +1481,46 @@ class CockpitData:
         )
         if data is None:
             return ByoResult(repo=repo, profile_like=profile_like, error=err or "no output")
-        return ByoResult.from_dict(repo, profile_like, data)
+        res = ByoResult.from_dict(repo, profile_like, data)
+        # The evaluate leg is safetensors-only BY DESIGN (the deriver's fit math
+        # reads config.json), so a GGUF-only repo aborts `unsupported-format`
+        # here even though route-G handles it first-class.  Intercept exactly
+        # that verdict, confirm the format from the inventory (error path only —
+        # the success path pays no extra API call), and redirect to the quant
+        # picker instead of surfacing a dead-end the user reads as "downloads
+        # are broken" (2026-07-27 community triage: a DavidAU *-GGUF repo +
+        # `--profile-like llamacpp/…` looked like a c3 download failure).
+        if res.fit_verdict == "unsupported-format":
+            inv = await self.bring_inspect(repo)
+            n = len(getattr(inv, "gguf_variants", None) or [])
+            if not getattr(inv, "error", "") and n and not inv.has_safetensors:
+                if self.profile_like_is_gguf_engine(profile_like):
+                    note = (
+                        f"GGUF-only repo — {n} quant(s) discovered. Pick one to "
+                        f"fit-check against {profile_like} (size-fit; the full "
+                        "gate math is safetensors-only)."
+                    )
+                else:
+                    note = (
+                        f"GGUF-only repo — {n} quant(s) discovered, but "
+                        f"{profile_like} is a safetensors engine. Pick a quant "
+                        "and a GGUF-engine sibling (llamacpp / ik-llama / "
+                        "beellama)."
+                    )
+                return ByoResult(
+                    repo=repo, profile_like=profile_like, arch="gguf",
+                    eligible=False, fit_verdict="gguf-pick-quant", note=note,
+                )
+        return res
+
+    # GGUF-engine slug prefixes (the registry's engine path segment) — the
+    # engines whose sibling composes route-G can clone.  vllm (safetensors)
+    # is deliberately absent.
+    _GGUF_ENGINE_PREFIXES = frozenset({"llamacpp", "ik-llama", "beellama"})
+
+    def profile_like_is_gguf_engine(self, profile_like: str) -> bool:
+        """True iff the slug's engine segment is a GGUF engine (route-G clonable)."""
+        return (profile_like or "").split("/", 1)[0] in self._GGUF_ENGINE_PREFIXES
 
     # Topology → card count (same tokens as funnel_slug_options / compose paths).
     _GGUF_TOPO_CARDS = {
@@ -2879,10 +3228,10 @@ class CockpitData:
           - ``--env-file .env`` (when present) resolves repo vars like
             ``${MODEL_DIR}`` / ``${HF_TOKEN}`` that some composes (comfyui) need.
 
-        Reconcile-gated: a GPU-holding service (ComfyUI / Step-Audio) can't
-        silently collide with whatever holds the cards, while a non-GPU web
-        service (litellm / qdrant / …) clears the gate immediately.  Tolerates the
-        ``.yml`` / ``.yaml`` spelling."""
+        Reconcile-gated for GPU-holding services only (ComfyUI / Step-Audio) so
+        they can't silently collide with whatever holds the cards; non-GPU web
+        services (litellm / qdrant / searxng / open-webui) skip the gate entirely.
+        Tolerates the ``.yml`` / ``.yaml`` spelling."""
         resolved = self._resolve_service_compose(name)
         rel, project = resolved if resolved is not None else (
             f"services/{name}/docker-compose.yml",
@@ -2898,11 +3247,15 @@ class CockpitData:
         # `env K=V …` (process env) wins over --env-file for compose interpolation.
         if name == STUDIO_DIRECTOR_CONTAINER:
             cmd = ["env", *(f"{k}={v}" for k, v in self.director_compose_env().items()), *cmd]
+        # Reconcile-gated for GPU-holding services only: they can't silently
+        # collide with whatever holds the cards; non-GPU web services clear
+        # the gate immediately.
+        is_gpu_holder = _classify_container_kind(name) is not None
         return ActionPlan(
             kind="service-up",
             cmd=cmd,
             description=f"docker compose up {name}",
-            requires_reconcile=True,
+            requires_reconcile=is_gpu_holder,
         )
 
     def service_start_or_restart(self, name: str) -> ActionPlan:
@@ -3055,7 +3408,8 @@ class CockpitData:
                 _run_env = dict(_os.environ)
                 if plan.env:
                     _run_env.update(plan.env)
-                state = await self._write_runner.start_raw(
+                state = await self._start_raw_logged(
+                    self._write_runner,
                     plan.cmd,
                     env=_run_env,
                     run_type=run_type or plan.kind,
@@ -3233,14 +3587,16 @@ class CockpitData:
         if url:
             env["URL"] = url
         parser = self._validation_parser(kind)
-        if on_event is not None or on_line is not None:
-            # Per-launch callbacks for the live pane.  set_callbacks is on the
-            # shared runner; the caller owns wiring/teardown.
-            self._write_runner.set_callbacks(on_event=on_event, on_line=on_line)
         # No reconcile gate (validation does not claim a GPU); straight to the
         # streamer.  In tests this is the FakeWriteRunner; live it is blocked.
-        return await self._write_runner.start_raw(
-            plan.cmd, env=env, run_type=plan.kind, parser=parser
+        return await self._start_raw_logged(
+            self._write_runner,
+            plan.cmd,
+            env=env,
+            run_type=plan.kind,
+            parser=parser,
+            on_event=on_event,
+            on_line=on_line,
         )
 
     # ── Producer / ③ Gate: the FULL validation battery (report.sh --full) ─────────
@@ -3297,12 +3653,16 @@ class CockpitData:
             env["MODEL"] = model
         if url:
             env["URL"] = url
-        if on_event is not None or on_line is not None:
-            self._write_runner.set_callbacks(on_event=on_event, on_line=on_line)
         # No reconcile gate (uses the serving model; claims no GPU); straight to
         # the streamer.  In tests this is the FakeWriteRunner; live it is blocked.
-        return await self._write_runner.start_raw(
-            plan.cmd, env=env, run_type=plan.kind, parser=_NullParser()
+        return await self._start_raw_logged(
+            self._write_runner,
+            plan.cmd,
+            env=env,
+            run_type=plan.kind,
+            parser=_NullParser(),
+            on_event=on_event,
+            on_line=on_line,
         )
 
     # ── Validate / Doctor: health + estate-diagnose + profile-triage (READS) ──────
@@ -4287,10 +4647,14 @@ class CockpitData:
                 env["C3T_TARGET_CONTAINER"] = target.container
             if getattr(target, "slug", ""):
                 env["C3T_TARGET_SLUG"] = target.slug
-        if on_event is not None or on_line is not None:
-            self._write_runner.set_callbacks(on_event=on_event, on_line=on_line)
-        return await self._write_runner.start_raw(
-            handoff.plan.cmd, env=env, run_type=handoff.plan.kind, parser=_NullParser()
+        return await self._start_raw_logged(
+            self._write_runner,
+            handoff.plan.cmd,
+            env=env,
+            run_type=handoff.plan.kind,
+            parser=_NullParser(),
+            on_event=on_event,
+            on_line=on_line,
         )
 
     # ── Hook 2: Promote to catalog — SCAFFOLD + GATE (design §3.5b) ────────────────
@@ -4546,6 +4910,9 @@ def _variant_row_from_dict(d: dict[str, Any]) -> VariantRow:
         # Weight-offload backend (catalog offload column) — same pattern;
         # "" when the contract didn't carry it (resident/older emit) → shows "—".
         object.__setattr__(row, "offload", str(d.get("offload") or ""))
+        # Minimum host RAM for offload slugs (hard gate). Kept as int|None rather than
+        # str so the column can render "—" for resident slugs without a magic string.
+        object.__setattr__(row, "host_ram_gb", d.get("host_ram_gb"))
         object.__setattr__(row, "chat_template", str(d.get("chat_template") or "native"))
         # W4A8-int8-activation capability (c3 serve-confirm checkbox, #609).
         object.__setattr__(row, "act8_capable", bool(d.get("act8_capable")))

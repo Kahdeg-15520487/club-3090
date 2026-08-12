@@ -20,6 +20,16 @@
 #   bash scripts/report.sh --full-calibration  # kv-calc matrix for ALL models (default: only the running model; skipped on llama.cpp/ik_llama)
 #   bash scripts/report.sh > my-rig.md       # capture for paste
 #
+# Exit codes (#813, committed to on #619):
+#   0  every stage that ran passed — or no stage was requested
+#   2  ADVISORY-only: a check flagged headroom/risk rather than incorrectness
+#      (today: verify-stress's agent-safety VRAM margin at the context ceiling —
+#      recall is correct there, the margin for sustained agent load is not)
+#   1  hard failure: a stage failed a correctness check, could not run, or the
+#      engine died mid-run and the remaining stages were skipped
+# The "Check summary" section names the failing check, so it is identifiable
+# from the exit path without reading every inner block.
+#
 # Why --soak is its own flag:
 #   verify-full + verify-stress + bench all PASS on configs that FAIL the
 #   multi-turn continuous soak (Cliff 2b at ~25K accumulated tokens). Until
@@ -55,6 +65,10 @@ FULL_CALIBRATION="${REPORT_FULL_CALIBRATION:-0}"
 print_help() {
   sed -n '2,/^set/p' "$0" | sed 's/^# \?//' | head -n -1
 }
+
+# Preserve the invocation so the "re-run with sudo" hint can echo back the SAME
+# flags, rather than a bare command the user has to reconstruct.
+REPORT_ARGS="$*"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -144,6 +158,29 @@ if [[ $REDACT -eq 1 ]]; then
   printf '\n_Redacted output (paths, host, user, tokens). Re-run with `--no-redact` for full data._\n'
 fi
 
+# Root-gated captures — warn UP FRONT, not per-section.
+#
+# Some of the most decision-relevant hardware facts are root-only: DIMM
+# population + configured memory speed (dmidecode), and ACS state on the
+# upstream bridge (lspci extended config space). Without them a report looks
+# complete while missing the fields that actually explain CPU-offload
+# throughput and whether GPU↔GPU P2P can engage.
+#
+# This is deterministic at start-up, so say it BEFORE the sections rather than
+# leaving a reader to notice three "needs root" lines scattered through a long
+# paste — which they will not, because reports get truncated from the bottom.
+if [[ $EUID -ne 0 ]] && ! sudo -n true 2>/dev/null; then
+  _root_gated=()
+  command -v dmidecode >/dev/null 2>&1 && _root_gated+=("DIMM count / size / configured memory speed")
+  command -v lspci >/dev/null 2>&1     && _root_gated+=("PCIe ACS capability state (LnkSta is still accurate)")
+  if [[ ${#_root_gated[@]} -gt 0 ]]; then
+    printf '\n> ⚠️ **Incomplete — running without root.** These fields were skipped:\n'
+    for _g in "${_root_gated[@]}"; do printf '> - %s\n' "$_g"; done
+    printf '>\n> For a complete report re-run with sudo:\n>\n> ```bash\n> sudo bash scripts/report.sh %s\n> ```\n' "${REPORT_ARGS:-}"
+    printf '>\n> Worth doing before filing a CPU-offload issue: memory channels and speed are the\n> variables that set throughput on those configs, and they cannot be read without root.\n'
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # System
 # ---------------------------------------------------------------------------
@@ -202,16 +239,115 @@ section "System"
   echo "- **Uptime:** $(uptime -p 2>/dev/null || echo unknown)"
 } | redact
 
+# _report_mem_bandwidth — MEASURED memory bandwidth, because the rated figure is
+# blind to the failure that matters.
+#
+# ⚠️ Firmware's "Configured Memory Speed" does NOT move when a channel is lost.
+# This rig read 3200 MT/s both before and after a DIMM went missing, while real
+# STREAM Triad fell ~100 -> 59.9 GB/s (2026-08-07). The spec number is exactly
+# the one that cannot detect the problem; the measured one is the only witness.
+# Our own learnings already say "the bandwidth number must be MEASURED, not spec"
+# — this implements it.
+#
+# Cheap and honest: ~1.5 GB, a few hundred ms, skipped when RAM is tight or no
+# compiler exists, and it SAYS SO rather than omitting the line (a missing row
+# reads as "nothing to report"). Disable with REPORT_NO_BANDWIDTH=1.
+_report_mem_bandwidth() {
+  [[ "${REPORT_NO_BANDWIDTH:-0}" == "1" ]] && return 0
+  local cc=""
+  for c in cc gcc clang; do command -v "$c" >/dev/null 2>&1 && { cc="$c"; break; }; done
+  if [[ -z "$cc" ]]; then
+    echo "- **Memory bandwidth:** not measured (no C compiler) — install \`gcc\` for a STREAM Triad figure"
+    return 0
+  fi
+  local free_mb; free_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
+  if [[ -n "$free_mb" && "$free_mb" -lt 4096 ]]; then
+    echo "- **Memory bandwidth:** not measured (only ${free_mb} MiB available; probe needs ~1.5 GB)"
+    return 0
+  fi
+  local d; d="$(mktemp -d 2>/dev/null)" || return 0
+  cat > "$d/t.c" <<'CEOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <time.h>
+#define N (64L*1024*1024)          /* 3 x 512 MiB */
+static double *a,*b,*c; static int NT;
+static void *w(void *p){ long id=(long)p, lo=N*id/NT, hi=N*(id+1)/NT;
+  for(long i=lo;i<hi;i++) c[i]=a[i]+3.0*b[i]; return 0; }
+int main(int argc,char**argv){
+  NT=atoi(argv[1]); if(NT<1)NT=1;
+  a=malloc(N*8); b=malloc(N*8); c=malloc(N*8);
+  if(!a||!b||!c){ printf("0\n"); return 1; }
+  for(long i=0;i<N;i++){a[i]=1.0;b[i]=2.0;c[i]=0.0;}
+  double best=0; pthread_t th[512];
+  for(int r=0;r<3;r++){
+    struct timespec s,e; clock_gettime(CLOCK_MONOTONIC,&s);
+    for(long i=0;i<NT;i++) pthread_create(&th[i],0,w,(void*)i);
+    for(long i=0;i<NT;i++) pthread_join(th[i],0);
+    clock_gettime(CLOCK_MONOTONIC,&e);
+    double dt=(e.tv_sec-s.tv_sec)+(e.tv_nsec-s.tv_nsec)/1e9;
+    double gbs=(3.0*N*8)/dt/1e9; if(gbs>best) best=gbs;
+  }
+  printf("%.1f\n",best); return 0;
+}
+CEOF
+  local gbs=""
+  if "$cc" -O2 -o "$d/t" "$d/t.c" -lpthread >/dev/null 2>&1; then
+    gbs="$("$d/t" "$(nproc 2>/dev/null || echo 4)" 2>/dev/null)"
+  fi
+  rm -rf "$d"
+  if [[ -n "$gbs" && "$gbs" != "0" ]]; then
+    echo "- **Memory bandwidth (measured):** ${gbs} GB/s STREAM Triad — *this*, not the rated MT/s above, is what sets CPU-offload decode throughput"
+  else
+    echo "- **Memory bandwidth:** probe failed to build/run — rated speed above is NOT a substitute"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # CPU + RAM
 # ---------------------------------------------------------------------------
 
 section "CPU + RAM"
 {
+  # ⚠️ This section is load-bearing for the CPU-offload slugs. Their throughput
+  # is set by the HOST — memory channels, memory speed, physical core count —
+  # not by the GPU, which is why those slugs publish no first-party numbers and
+  # ask readers for theirs instead. Reporting only "model name + thread count"
+  # made that ask unanswerable: physical cores are not derivable from the model
+  # string on most vendors, and channels/speed were not collected at all.
   if have lscpu; then
-    cpu_model=$(lscpu 2>/dev/null | awk -F: '/Model name/ {sub(/^ */, "", $2); print $2; exit}')
-    cpu_cores=$(lscpu 2>/dev/null | awk -F: '/^CPU\(s\):/ {gsub(/ /, "", $2); print $2; exit}')
-    echo "- **CPU:** ${cpu_model:-unknown} (${cpu_cores:-?} threads)"
+    # LC_ALL=C — lscpu TRANSLATES its field labels, so every lookup below would
+    # silently return empty on a non-English locale (same class as #779).
+    _lscpu="$(LC_ALL=C lscpu 2>/dev/null)"
+    _lscpu_f() { printf '%s\n' "$_lscpu" | grep -m1 -E "^$1:" | sed -E 's/^[^:]*:[[:space:]]*//'; }
+
+    cpu_model="$(_lscpu_f 'Model name')"
+    cpu_threads="$(_lscpu_f 'CPU\(s\)')"
+    cpu_sockets="$(_lscpu_f 'Socket\(s\)')"
+    cpu_percore="$(_lscpu_f 'Core\(s\) per socket')"
+    cpu_tpc="$(_lscpu_f 'Thread\(s\) per core')"
+    cpu_numa="$(_lscpu_f 'NUMA node\(s\)')"
+    cpu_hyp="$(_lscpu_f 'Hypervisor vendor')"
+
+    echo "- **CPU:** ${cpu_model:-unknown}"
+    cpu_phys=""
+    [[ -n "$cpu_sockets" && -n "$cpu_percore" ]] && cpu_phys=$(( cpu_sockets * cpu_percore ))
+    echo "- **CPU topology:** ${cpu_sockets:-?} socket(s) × ${cpu_percore:-?} core(s) = ${cpu_phys:-?} physical, ${cpu_tpc:-?} thread(s)/core → ${cpu_threads:-?} logical"
+    [[ -n "$cpu_numa" ]] && echo "- **NUMA nodes:** $cpu_numa"
+
+    # nproc honours cgroup/affinity limits and is what the offload `-t` default
+    # halves — so a divergence from lscpu's total changes the thread count the
+    # launcher picks, and is worth surfacing rather than silently disagreeing.
+    if have nproc; then
+      cpu_nproc="$(nproc 2>/dev/null)"
+      if [[ -n "$cpu_nproc" && -n "$cpu_threads" && "$cpu_nproc" != "$cpu_threads" ]]; then
+        echo "- **nproc:** $cpu_nproc ⚠️ differs from lscpu's $cpu_threads — cgroup/affinity limited; offload \`-t\` derives from this"
+      else
+        echo "- **nproc:** ${cpu_nproc:-?}"
+      fi
+    fi
+    [[ -n "$cpu_hyp" ]] && echo "- **Virtualized:** yes — $cpu_hyp ($(_lscpu_f 'Virtualization type'))"
   else
     echo "- **CPU:** lscpu not available"
   fi
@@ -222,6 +358,59 @@ section "CPU + RAM"
     echo "- **RAM:** ${ram_total} total, ${ram_avail} available"
     swap_total=$(free -h 2>/dev/null | awk '/^Swap:/ {print $2}')
     [[ "$swap_total" != "0B" && -n "$swap_total" ]] && echo "- **Swap:** $swap_total"
+  fi
+
+  # DIMM population + configured speed. Needs root, so it is best-effort — but
+  # ALWAYS print a line: an omitted row is indistinguishable from "nothing to
+  # report", and a reader must be able to tell "unknown" from "not collected".
+  _dmi=""
+  if have dmidecode; then
+    if [[ $EUID -eq 0 ]]; then
+      _dmi="$(dmidecode -t memory 2>/dev/null)"
+    elif sudo -n true 2>/dev/null; then
+      _dmi="$(sudo -n dmidecode -t memory 2>/dev/null)"
+    fi
+  fi
+  if [[ -n "$_dmi" ]]; then
+    printf '%s\n' "$_dmi" | awk '
+      BEGIN { RS = ""; FS = "\n" }
+      /Memory Device/ {
+        slots++; size = ""; spd = ""; ch = ""
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^[[:space:]]*Size:/)                    { s = $i; sub(/^[^:]*:[[:space:]]*/, "", s); size = s }
+          if ($i ~ /^[[:space:]]*Configured Memory Speed:/) { s = $i; sub(/^[^:]*:[[:space:]]*/, "", s); spd  = s }
+          if ($i ~ /^[[:space:]]*Bank Locator:/)            { s = $i; sub(/^[^:]*:[[:space:]]*/, "", s); ch   = s }
+        }
+        # ⚠️ CHANNEL identity, not just a slot tally. Slots != channels — boards
+        # commonly carry 2 DIMMs per channel, so "7 of 8 slots" can mean four fully
+        # populated channels, a completely different bandwidth story. It is CHANNEL
+        # population that sets the interleave, and the interleave is what moves GB/s.
+        if (ch != "") { if (!(ch in seen_ch)) { seen_ch[ch] = 1; nch++ } }
+        if (size != "" && size !~ /No Module/) {
+          pop++; sizes[size]++
+          if (ch != "") full_ch[ch] = 1
+          if (spd != "" && spd !~ /Unknown/) speeds[spd]++
+        } else if (ch != "") { empty_list = empty_list (empty_list ? ", " : "") ch }
+      }
+      END {
+        if (slots == 0) { print "- **Memory config:** dmidecode reported no memory devices"; exit }
+        for (s in sizes)  desc = desc (desc ? " + " : "") sizes[s] "× " s
+        for (s in speeds) sp   = sp   (sp   ? ", "   : "") s
+        nfull = 0; for (c in full_ch) nfull++
+        printf "- **Memory config:** %d of %d slot(s) populated — %s%s\n", pop, slots, desc,
+               (sp != "" ? " @ " sp " (rated — NOT measured; see bandwidth below)" : " (speed not reported by firmware)")
+        if (nch > 0)
+          printf "- **Memory channels:** %d of %d populated%s\n", nfull, nch,
+                 (empty_list != "" ? " — EMPTY: " empty_list : "")
+        if (nfull < nch)
+          print "  - ⚠️ _An unpopulated channel forces a coarser interleave. Measured on this stack: losing ONE of eight channels cost ~**30% of bandwidth** (~100 → 69.8 GB/s idle; 59.9 under load) — 2.4× worse than the 12.5% a naive share implies._"
+      }'
+    _report_mem_bandwidth
+  elif have dmidecode; then
+    echo "- **Memory config:** not collected (needs root) — run \`sudo dmidecode -t memory\` for DIMM count / size / configured speed"
+    _report_mem_bandwidth
+  else
+    echo "- **Memory config:** not collected (\`dmidecode\` not installed)"
   fi
 } | redact
 
@@ -316,10 +505,43 @@ else
     nvidia-smi nvlink --status 2>&1 | redact | details "NVLink link status"
   else
     echo "_No NVLink detected (PCIe-only)_"
+    # "Could P2P be on here, and is it worth it?" — the question a 2-card
+    # PCIe rig actually has, which every other line in this report leaves
+    # unanswered (the verdict below needs a RUNNING container; this doesn't).
+    # Tiered + achievability-gated on purpose: see p2p_opportunity_hint.
+    _p2p_count="$(p2p_gpu_count)"
+    _p2p_cap="$(p2p_host_capability "$_p2p_count" 2>/dev/null || echo none)"
+    if [[ "$_p2p_cap" == "pcie_p2p" ]]; then
+      # ⚠️ The hint below deliberately says NOTHING once peer access is already
+      # granted ("already covered"). That left a rig with working P2P showing no
+      # interconnect status at all — and a reader cannot tell "nothing to say"
+      # from "never ran". State it positively instead, with the caveat that
+      # matters most here: a grant is not proof.
+      echo
+      echo "ℹ interconnect: ${_p2p_count} GPUs, no NVLink, but \`topo -p2p\` reports peer access **enabled on every pair** — P2P is granted on this host."
+      echo
+      echo "  ⚠️ A grant is not proof it works. \`topo -p2p OK\` reflects the driver's *permission*, not a completed transfer: a dual-5090 pair read OK and then hung inside \`ncclCommInitRank\` (#873). Only an actual peer transfer settles it — \`bash scripts/p2p-validate.sh\` runs a real all-reduce, which copy-then-sync benchmarks cannot substitute for. If a multi-GPU engine hangs at init, suspect this first."
+    else
+      _p2p_hint="$(p2p_opportunity_hint "$_p2p_count" "$_p2p_cap" 2>/dev/null || true)"
+      [[ -n "$_p2p_hint" ]] && { echo; echo "$_p2p_hint"; }
+    fi
   fi
 
   subsection "Topology"
   nvidia-smi topo -m 2>&1 | redact | details "PCIe / GPU topology matrix"
+
+  # Peer-access matrix — ALWAYS, not just when lspci is missing.
+  #
+  # This used to be emitted only as an lspci fallback, so any rig with pciutils
+  # installed (i.e. most) filed a report containing no P2P verdict at all — the
+  # one command that answers "is peer access on?" was the one we skipped. It is
+  # a single cheap call and it is the PRIMARY signal; the lspci ACS/LnkSta dump
+  # below is supporting evidence, not a substitute for it.
+  if have nvidia-smi && [[ "$(p2p_gpu_count)" -ge 2 ]]; then
+    if nvidia-smi topo -p2p rw >/dev/null 2>&1; then
+      nvidia-smi topo -p2p rw 2>&1 | redact | details "GPU peer-access matrix (topo -p2p rw)"
+    fi
+  fi
 
   # lspci-based PCIe/P2P detail. nvidia-smi reports negotiated gen/width but
   # cannot show trained link state vs capability side-by-side, ACS state on the
@@ -327,14 +549,9 @@ else
   # actually decide whether GPU↔GPU P2P engages (see issues #137, #351).
   subsection "PCIe / P2P detail (lspci)"
   if ! have lspci; then
-    # Fallback: nvidia-smi topo -p2p doesn't need pciutils and shows P2P capability
-    if have nvidia-smi && nvidia-smi topo -p2p rw >/dev/null 2>&1; then
-      echo "_lspci not available (pciutils not installed) — showing P2P capability matrix instead._"
-      echo
-      nvidia-smi topo -p2p rw | redact
-    else
-      echo "_lspci not available (pciutils not installed) — skipping PCIe/P2P detail._"
-    fi
+    # The peer-access matrix is emitted unconditionally under Topology above, so
+    # there is nothing to fall back to here any more — just say what is missing.
+    echo "_lspci not available (pciutils not installed) — skipping ACS / LnkSta detail. The peer-access matrix under **Topology** above is unaffected; install \`pciutils\` for the link-state and ACS evidence._"
   else
     # sudo lspci -vvv is needed for full capability blocks (ACS lives in the
     # extended config space, root-only). Degrade gracefully if sudo is
@@ -991,15 +1208,201 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Stage gating + engine liveness (#830)
+# ---------------------------------------------------------------------------
+# Every stage used to run unconditionally, so a mid-run engine death produced N
+# more identical `<details>` blocks, each reading like its own fault:
+#
+#   ## bench.sh output
+#   ERROR: service not reachable at http://localhost:8099/v1/models
+#     Start with: cd compose && docker compose up -d
+#   ## bench-agentic.sh output
+#   ERROR: service not reachable at http://localhost:8099/v1/models
+#     Start with: bash scripts/launch.sh
+#
+# That is one dead engine wearing two faults, and the "just start it" hints are
+# actively wrong — the service WAS started, it crashed (#827). So we probe the
+# endpoint between stages and, once it stops answering, skip the rest with the
+# causal order stated instead of running each one into the same wall.
+#
+# Deliberately NOT done: aborting on a stage's own failure. A thin-VRAM-margin
+# advisory is no reason to skip soak, and the point of --full is a complete
+# artifact for cross-rig comparison. Bailing early would have made #827's report
+# LESS useful — the soak crash is the finding. Only loss of the endpoint gates.
+
+STAGE_ENDPOINT=""
+ENGINE_PROBE=0        # 1 = we have an endpoint we can meaningfully probe
+ENGINE_DEAD=0
+ENGINE_DEAD_AFTER=""
+ENGINE_UP_AT_START=0
+LAST_STAGE_RUN=""
+
+# ---------------------------------------------------------------------------
+# Stage verdict accounting (#813) — inner verdicts must reach the outer exit.
+# ---------------------------------------------------------------------------
+# Committed to on #619: `report.sh --full` exited 0 while verify-stress printed
+# "1 stress check(s) failed" inside. A --full chain whose exit code doesn't
+# reflect inner verdicts is unsafe to automate against, which is the entire
+# point of --full. @seanyourhighness caught it only by reading inner verdicts,
+# which most reporters reasonably won't.
+#
+# Exit contract:
+#   0  every stage that ran passed (or no stage was requested)
+#   2  ADVISORY-only failure — a check fired that flags headroom or risk rather
+#      than incorrectness. Today that is verify-stress's agent-safety VRAM
+#      margin: recall is CORRECT at the ceiling, what fails is the margin for
+#      sustained agent load. Distinguishable so a caller can gate on hard
+#      failures alone.
+#   1  hard failure — a stage failed a correctness check, could not run, or the
+#      engine died mid-run.
+#
+# The advisory classifier reads the stage's own output rather than its exit
+# code, because verify-stress exits with the COUNT of failed checks and does not
+# distinguish the classes. `✗` is emitted only by fail(); the margin advisory
+# prints `⚠ VRAM margin thin at ceiling`. So: nonzero exit + no `✗` + a margin
+# line == advisory-only. Read from the RAW output, before redaction.
+STAGE_ROWS=()
+STAGE_WORST=0         # 0 clean · 2 advisory · 1 hard
+STAGE_RAW_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_RAW_DIR"' EXIT
+
+# Escalate to the worst verdict seen. Hard (1) outranks advisory (2).
+stage_escalate() {
+  case "$1" in
+    1) STAGE_WORST=1 ;;
+    2) [[ $STAGE_WORST -eq 1 ]] || STAGE_WORST=2 ;;
+  esac
+}
+
+# stage_record <flag-key> <exit-code> <raw-output-file|"">
+stage_record() {
+  local key="$1" rc="$2" raw="${3:-}" verdict detail advisory=0 hard=0
+  if [[ "$rc" -eq 0 ]]; then
+    verdict="PASS"; detail="—"
+  else
+    if [[ -n "$raw" && -f "$raw" ]]; then
+      hard="$(command grep -c '✗' "$raw" 2>/dev/null || true)"
+      advisory="$(command grep -c 'VRAM margin thin at ceiling' "$raw" 2>/dev/null || true)"
+    fi
+    if [[ "${hard:-0}" -eq 0 && "${advisory:-0}" -gt 0 ]]; then
+      verdict="ADVISORY"
+      detail="agent-safety VRAM margin thin at ceiling (recall correct; headroom is not)"
+      stage_escalate 2
+    else
+      verdict="FAIL"
+      if [[ -n "$raw" && -f "$raw" && "${hard:-0}" -gt 0 ]]; then
+        # Name the failing checks so they're identifiable from the exit path.
+        detail="$(sed -E 's/\x1b\[[0-9;]*[mK]//g' "$raw" | command grep '✗' \
+          | sed -E 's/^[[:space:]]*✗[[:space:]]*//' | head -3 | paste -sd';' - \
+          | sed -E 's/;/ · /g')"
+        [[ -n "$detail" ]] || detail="see the block above"
+      else
+        detail="see the block above"
+      fi
+      stage_escalate 1
+    fi
+  fi
+  # `|` is the row separator AND the markdown cell separator — a check message
+  # carrying one would split the row in both places.
+  detail="${detail//|/ / }"
+  STAGE_ROWS+=("$(stage_label "$key")|${rc}|${verdict}|${detail}")
+}
+
+# stage_skipped <flag-key> <reason>
+stage_skipped() {
+  STAGE_ROWS+=("$(stage_label "$1")|-|SKIPPED|$2")
+  stage_escalate 1
+}
+
+# Flag key -> the script the stage runs, for human-readable causal statements.
+stage_label() {
+  case "$1" in
+    verify)  echo "verify-full.sh" ;;
+    stress)  echo "verify-stress.sh" ;;
+    soak)    echo "soak-test.sh" ;;
+    bench)   echo "bench.sh" ;;
+    agentic) echo "bench-agentic.sh" ;;
+    *)       echo "$1" ;;
+  esac
+}
+
+# Resolve the engine endpoint the same way preflight.sh / soak-test.sh do: by
+# the container's ENGINE-INTERNAL port mapping (vLLM 8000 / llama.cpp 8080 /
+# sglang 30000), never a model-name allowlist. Mirrors, rather than sources,
+# preflight.sh — that file executes checks at source time.
+resolve_stage_endpoint() {
+  if [[ -n "${URL:-}" ]]; then printf '%s\n' "${URL%/}"; return 0; fi
+  if [[ -n "${ENDPOINT:-}" ]]; then printf '%s\n' "${ENDPOINT%/}"; return 0; fi
+  have docker || return 0
+  [[ -n "$CONTAINER" ]] || return 0
+  local internal mapped port
+  for internal in 8000 8080 30000; do
+    mapped="$(docker port "$CONTAINER" "${internal}/tcp" 2>/dev/null | head -1 || true)"
+    if [[ -n "$mapped" ]]; then
+      port="${mapped##*:}"
+      [[ "$port" =~ ^[0-9]+$ ]] && { printf 'http://localhost:%s\n' "$port"; return 0; }
+    fi
+  done
+  return 0
+}
+
+engine_alive() {
+  [[ $ENGINE_PROBE -eq 1 ]] || return 0   # can't probe → never claim it's dead
+  curl -sf -m 5 "${STAGE_ENDPOINT}/v1/models" >/dev/null 2>&1
+}
+
+# Called BEFORE each stage. Returns 1 when the stage must be skipped.
+stage_guard() {
+  local stage="$1"
+  if [[ $ENGINE_DEAD -eq 1 ]]; then
+    printf '_SKIPPED — endpoint unreachable since **%s** (the engine appears to have crashed there). ' "$ENGINE_DEAD_AFTER"
+    printf 'This stage was not run, so it contributes no evidence: it would only have reproduced the same '
+    printf 'connection failure. Container logs are above. Re-run `bash scripts/report.sh --%s` once the service is back._\n' "$stage"
+    stage_skipped "$stage" "endpoint unreachable since ${ENGINE_DEAD_AFTER}"
+    return 1
+  fi
+  if [[ $ENGINE_PROBE -eq 1 ]] && ! engine_alive; then
+    ENGINE_DEAD=1
+    ENGINE_DEAD_AFTER="$(stage_label "${LAST_STAGE_RUN:-an earlier stage}")"
+    printf '_SKIPPED — the endpoint stopped answering after **%s**. ' "$ENGINE_DEAD_AFTER"
+    printf 'The engine did not survive that stage; every remaining stage is skipped rather than run into the '
+    printf 'same wall. Container logs are above. Re-run `bash scripts/report.sh --%s` once the service is back._\n' "$stage"
+    stage_skipped "$stage" "endpoint died during ${ENGINE_DEAD_AFTER}"
+    return 1
+  fi
+  LAST_STAGE_RUN="$stage"
+  return 0
+}
+
+if [[ $DO_VERIFY -eq 1 || $DO_STRESS -eq 1 || $DO_SOAK -eq 1 || $DO_BENCH -eq 1 || $DO_AGENTIC -eq 1 ]]; then
+  STAGE_ENDPOINT="$(resolve_stage_endpoint)"
+  if [[ -n "$STAGE_ENDPOINT" ]] && have curl; then
+    ENGINE_PROBE=1
+    if engine_alive; then
+      ENGINE_UP_AT_START=1
+    else
+      # Never up. This IS the "just start it" case, and saying so once beats
+      # saying it once per stage.
+      ENGINE_DEAD=1
+      ENGINE_DEAD_AFTER="before any stage ran (the endpoint was never reachable)"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Optional: verify-full
 # ---------------------------------------------------------------------------
 
 if [[ $DO_VERIFY -eq 1 ]]; then
   section "verify-full.sh output"
-  if [[ -f scripts/verify-full.sh ]]; then
-    bash scripts/verify-full.sh 2>&1 | redact | details "verify-full output"
-  else
+  if [[ ! -f scripts/verify-full.sh ]]; then
     echo "_scripts/verify-full.sh not found_"
+  elif stage_guard verify; then
+    # tee the RAW output aside so stage_record can classify + name the failing
+    # checks; redaction would keep the markers but the tee is where the exit
+    # path gets its evidence. PIPESTATUS[0] is the stage's own code.
+    bash scripts/verify-full.sh 2>&1 | tee "${STAGE_RAW_DIR}/verify" | redact | details "verify-full output"
+    stage_record verify "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/verify"
   fi
 fi
 
@@ -1009,10 +1412,11 @@ fi
 
 if [[ $DO_STRESS -eq 1 ]]; then
   section "verify-stress.sh output"
-  if [[ -f scripts/verify-stress.sh ]]; then
-    bash scripts/verify-stress.sh 2>&1 | redact | details "verify-stress output (7 boundary checks incl. Cliff 2 needle recall)"
-  else
+  if [[ ! -f scripts/verify-stress.sh ]]; then
     echo "_scripts/verify-stress.sh not found_"
+  elif stage_guard stress; then
+    bash scripts/verify-stress.sh 2>&1 | tee "${STAGE_RAW_DIR}/stress" | redact | details "verify-stress output (7 boundary checks incl. Cliff 2 needle recall)"
+    stage_record stress "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/stress"
   fi
 fi
 
@@ -1022,11 +1426,14 @@ fi
 
 if [[ $DO_SOAK -eq 1 ]]; then
   section "soak-test.sh (SOAK_MODE=continuous) output"
-  if [[ -f scripts/soak-test.sh ]]; then
+  if [[ ! -f scripts/soak-test.sh ]]; then
+    echo "_scripts/soak-test.sh not found_"
+  elif stage_guard soak; then
     soak_run_dir="results/report-soak-$(date +%Y%m%d-%H%M%S)"
     SOAK_MODE=continuous SOAK_SESSIONS=5 SOAK_TURNS=5 SOAK_OUTPUT="$soak_run_dir" \
       SOAK_TIMEOUT_S="${SOAK_TIMEOUT_S:-1800}" \
-      bash scripts/soak-test.sh 2>&1 | redact | details "soak-test stdout (5-session × 5-turn ramping conversation, ~25 min)"
+      bash scripts/soak-test.sh 2>&1 | tee "${STAGE_RAW_DIR}/soak" | redact | details "soak-test stdout (5-session × 5-turn ramping conversation, ~25 min)"
+    stage_record soak "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/soak"
     if [[ -f "$soak_run_dir/summary.md" ]]; then
       echo
       echo "**Soak summary** (\`$soak_run_dir/summary.md\`):"
@@ -1035,8 +1442,6 @@ if [[ $DO_SOAK -eq 1 ]]; then
     else
       echo "_soak summary.md not produced — check stdout above_"
     fi
-  else
-    echo "_scripts/soak-test.sh not found_"
   fi
 fi
 
@@ -1046,10 +1451,11 @@ fi
 
 if [[ $DO_BENCH -eq 1 ]]; then
   section "bench.sh output"
-  if [[ -f scripts/bench.sh ]]; then
-    bash scripts/bench.sh 2>&1 | redact | details "bench output (3 warmups + 5 measured per prompt)"
-  else
+  if [[ ! -f scripts/bench.sh ]]; then
     echo "_scripts/bench.sh not found_"
+  elif stage_guard bench; then
+    bash scripts/bench.sh 2>&1 | tee "${STAGE_RAW_DIR}/bench" | redact | details "bench output (3 warmups + 5 measured per prompt)"
+    stage_record bench "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/bench"
   fi
 fi
 
@@ -1080,10 +1486,11 @@ fi
 
 if [[ $DO_AGENTIC -eq 1 ]]; then
   section "bench-agentic.sh output"
-  if [[ -f scripts/bench-agentic.sh ]]; then
-    SESSIONS=1 bash scripts/bench-agentic.sh 2>&1 | redact | details "bench-agentic output (1 session x 12 default turns, curve-shape estimate; ~8 min estimate)"
-  else
+  if [[ ! -f scripts/bench-agentic.sh ]]; then
     echo "_scripts/bench-agentic.sh not found_"
+  elif stage_guard agentic; then
+    SESSIONS=1 bash scripts/bench-agentic.sh 2>&1 | tee "${STAGE_RAW_DIR}/agentic" | redact | details "bench-agentic output (1 session x 12 default turns, curve-shape estimate; ~8 min estimate)"
+    stage_record agentic "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/agentic"
   fi
 fi
 
@@ -1112,6 +1519,65 @@ if [[ $DO_STUDIO -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Engine liveness verdict (#830) — ONE verdict, not one per skipped stage.
+# ---------------------------------------------------------------------------
+
+if [[ $ENGINE_DEAD -eq 1 ]]; then
+  section "Engine liveness"
+  if [[ $ENGINE_UP_AT_START -eq 0 ]]; then
+    cat <<EOF
+> ❌ **The endpoint was never reachable — no stage ran.**
+>
+> \`${STAGE_ENDPOINT}/v1/models\` did not answer before the first stage, so the
+> stages were skipped rather than each reporting the same connection failure.
+>
+> Start the service and re-run:
+>
+> \`\`\`bash
+> bash scripts/launch.sh          # or: bash scripts/switch.sh <variant>
+> \`\`\`
+EOF
+  else
+    cat <<EOF
+> ❌ **The engine died during this run — remaining stages were skipped.**
+>
+> The endpoint answered at the start and stopped answering after **${ENGINE_DEAD_AFTER}**.
+> That is ONE fault, not one per stage: the later stages were skipped instead of
+> each reproducing the same unreachable-endpoint error, which reads like
+> additional independent failures and sends triage the wrong way.
+>
+> **The service was running and crashed — do not "just start it" without reading
+> why.** The container log sections above carry the actual cause. Common ones on
+> this stack: an MTP drafter emitting out-of-range draft token IDs under
+> sustained multi-turn load (\`SPEC_N=3\` is the known-good workaround, see #758),
+> or an OOM at high accumulated context.
+>
+> Re-run the skipped stages individually once the service is back.
+EOF
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Check summary (#813) — the failing check must be nameable from the exit path.
+# ---------------------------------------------------------------------------
+
+if [[ ${#STAGE_ROWS[@]} -gt 0 ]]; then
+  section "Check summary"
+  echo "| Stage | Exit | Verdict | Detail |"
+  echo "|---|---:|---|---|"
+  for row in "${STAGE_ROWS[@]}"; do
+    IFS='|' read -r _s _rc _v _d <<< "$row"
+    printf '| %s | %s | %s | %s |\n' "$_s" "$_rc" "$_v" "$_d"
+  done | redact
+  echo
+  case "$STAGE_WORST" in
+    0) echo "**Overall: PASS** — every stage that ran passed. \`report.sh\` exits 0." ;;
+    2) echo "**Overall: ADVISORY** — no correctness check failed, but an advisory fired (headroom / risk, not incorrectness). \`report.sh\` exits **2**, so a caller can gate on hard failures alone." ;;
+    *) echo "**Overall: FAIL** — at least one stage failed a check, could not run, or was skipped. \`report.sh\` exits **1**." ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 
@@ -1119,5 +1585,7 @@ cat <<'EOF'
 
 ---
 
-_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only)._
+_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only). Exit code: 0 all-clear · 2 advisory-only · 1 hard failure._
 EOF
+
+exit "$STAGE_WORST"

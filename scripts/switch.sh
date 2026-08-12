@@ -434,14 +434,14 @@ list_variants() {
   done
   local _visible=$(( _prod + _cav + _na ))
   # List the hidden topologies in rank order so both the header tally and the
-  # filter note name exactly what's missing (e.g. "dual/multi4"). Pure bash —
-  # no external grep/sort dependency.
+  # filter note name exactly what's missing (e.g. "dual/multi4"). Pin C
+  # collation so --list stays byte-identical across host locales (#779).
   local _topo_list="" _t
   local _hidden_topos
   _hidden_topos="$(
     for _t in "${!_hidden_by_topo[@]}"; do
       printf '%s\t%s\n' "$(topology_rank "$_t")" "$_t"
-    done | sort -k1,1n -k2,2 | cut -f2
+    done | LC_ALL=C sort -k1,1n -k2,2 | cut -f2
   )"
   while IFS= read -r _t; do
     [[ -n "$_t" ]] || continue
@@ -482,7 +482,7 @@ list_variants() {
       printf '%s\t%d\t%s\t%s\t%s/%s\t%s\t%s\n' \
         "${dseg[1]:-?}" "$rank" "$topo" "$v" "${fseg[1]:-?}" "${fseg[2]:-${file}}" "$marker" "${VARIANT_CTX[$v]:-}"
     done
-  } | sort -t$'\t' -k1,1 -k2,2n -k4,4 | awk -F'\t' '
+  } | LC_ALL=C sort -t$'\t' -k1,1 -k2,2n -k4,4 | awk -F'\t' '
     { rows[NR] = $0; cnt[$1]++ }
     END {
       for (i = 1; i <= NR; i++) {
@@ -950,6 +950,13 @@ export_variant_engine_pin() {
         export VLLM_USE_DEEP_GEMM="$value"
         echo "[switch] fp8 weights: VLLM_USE_DEEP_GEMM=${value} (consumer card has no DeepGEMM recipe — disc #571)" ;;
       VLLM_ATTENTION_BACKEND) export VLLM_ATTENTION_BACKEND="$value" ;;
+      # #809 — the model's declared decode class. A block-diffusion (dLLM)
+      # model has no measurable decode window on a single-canvas response,
+      # so decode_TPS is not a decode rate for it; the harness labels the
+      # output instead of printing a divide-by-epsilon figure.
+      DECODE_GRANULARITY)
+        export DECODE_GRANULARITY="$value"
+        echo "[switch] decode granularity: DECODE_GRANULARITY=${value} (declared by the model profile; decode_TPS is not a decode rate for this class — #809)" ;;
       *) echo "[switch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
     esac
   done <<< "$output"
@@ -1032,6 +1039,13 @@ up_variant() {
     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
     # No-op for composes without an LMCache-l1-gb metadata header.
     preflight_lmcache_ram "${full_dir}/${file}" || exit 1
+    # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
+    # the guards must see the RESOLVED config, not the compose defaults.
+    resolve_offload_residency "${full_dir}/${file}"
+    resolve_offload_threads   "${full_dir}/${file}"
+    # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
+    preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
+    preflight_offload_split_mode "${full_dir}/${file}" || exit 1
     preflight_kv_format_hint "${full_dir}/${file}" || true
     # Single-card util-override guard — runs even under --force (the nvfp4 slug
     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).

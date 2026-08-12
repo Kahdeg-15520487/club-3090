@@ -242,6 +242,7 @@ patches:
     load_bearing_when:
       - composes:
           - vllm/gemma-31b-dual
+          - vllm/gemma-31b-multi-google-qat-w4a16
           - vllm/gemma-12b-single-int8-mtp
           - vllm/gemma-26ba4b-single
           - vllm/gemma-e4b-dual-bf16
