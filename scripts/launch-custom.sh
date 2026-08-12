@@ -27,8 +27,7 @@ case "$choice" in
   4) bash scripts/switch.sh --force vllm/gemma-e4b-dual-bf16 ;;
   5) bash scripts/switch.sh vllm/dual ;;
   6) bash scripts/switch.sh vllm/gemma-31b-dual ;;
-  s) docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | head -1
-     docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -iE "vllm|beellama|llama" || echo "  (none running)" ;;
+  s) docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | grep -iE "vllm|beellama|llama|NAMES" || echo "  (none running)" ;;
   x) docker ps --format '{{.Names}}' | grep -iE "vllm|beellama|llama" | xargs -r docker stop
      echo "Stopped." ;;
   q) exit 0 ;;
