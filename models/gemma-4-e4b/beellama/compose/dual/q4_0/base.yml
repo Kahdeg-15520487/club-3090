@@ -1,0 +1,69 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma-4-E4B-it (Google QAT Q4_0 GGUF — google/gemma-4-E4B-it-qat-q4_0-gguf)
+#   Engine:    beellama.cpp (Anbeeld llama.cpp fork — SWA windowed KV)
+#   Topology:  Dual 3090 (layer-split across both cards, PCIe — no NVLink needed)
+#   Drafter:   none (no compatible DFlash draft available for E4B arch yet)
+#   KV:        q8_0 / q8_0 (high fidelity — tons of VRAM headroom at this model size)
+#   Vision:    yes (mmproj mounted; set MMPROJ_FILE to override)
+#   Template:  native (GGUF-embedded) via --jinja
+#   Max ctx:   131072 default (generous fit on ~48 GB combined VRAM with Q4_0 weights)
+#   Genesis:   N/A — beellama is a llama.cpp-family engine
+#   Status:    🐣 Incubating — local preset, NOT validated
+#   Best for:  Lightweight Gemma-4 on dual 3090 — tiny Q4_0 GGUF (~4.5 GB) leaves
+#              huge VRAM headroom for massive context or multi-stream serving
+# ---------------------------------------------------------------------------
+# Gemma-4-E4B-it on beellama.cpp — DUAL 3090, Q4_0 GGUF, q8_0 KV, layer-split.
+#
+# Download the GGUF:
+#   cd $MODEL_DIR
+#   mkdir -p gemma-4-e4b-gguf
+#   hf download google/gemma-4-E4B-it-qat-q4_0-gguf gemma-4-E4B_q4_0-it.gguf \
+#     --local-dir gemma-4-e4b-gguf
+#
+# Boot:
+#   bash scripts/switch.sh --force beellama/gemma-e4b-dual-q4_0
+#
+# Override via .env or shell:
+#   MODEL_DIR       host dir mounted as /models
+#   CTX_SIZE        KV pool size (default: 131072)
+#   PORT            host port (default: 8201)
+services:
+  beellama-gemma-4-e4b-dual:
+    image: ${BEELLAMA_IMAGE:-ghcr.io/noonghunna/beellama-cpp:multiarch-v0.3.0-efe856397}
+    container_name: "${ESTATE_CONTAINER:-beellama-gemma-4-e4b-dual}"
+    restart: unless-stopped
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8201}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-gemma-4-e4b-gguf/gemma-4-E4B_q4_0-it.gguf}
+      --mmproj /models/${MMPROJ_FILE:-gemma-4-e4b-gguf/gemma-4-E4B-it-mmproj.gguf}
+      -ngl all
+      --split-mode ${SPLIT_MODE:-layer}
+      --main-gpu ${MAIN_GPU:-0}
+      --ctx-size ${CTX_SIZE:-131072}
+      -b ${BATCH_SIZE:-2048}
+      -ub ${UBATCH_SIZE:-512}
+      -np ${NP:-8}
+      --kv-unified
+      --cache-type-k ${KV_TYPE_K:-q8_0}
+      --cache-type-v ${KV_TYPE_V:-q8_0}
+      --flash-attn on
+      --cache-ram 0
+      --no-host
+      --jinja
+      --temp ${TEMP:-${TEMPERATURE:-1.0}}
+      --top-k ${TOP_K:-64}
+      --top-p ${TOP_P:-0.95}
+      --min-p ${MIN_P:-0.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
