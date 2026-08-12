@@ -32,12 +32,12 @@ run_test() {
 run_test "load_profiles parses all profile groups" <<'PY'
 from scripts.lib.profiles.compat import load_profiles
 p = load_profiles()
-assert len(p.hardware) == 10  # +dgx-spark (#576 follow-up)
-assert len(p.models) == 15  # +gemma-4-e4b
+assert len(p.hardware) == 11  # +dgx-spark (#576 follow-up), +rtx-a6000 (#948 thread)
+assert len(p.models) == 16   # +qwen-agentworld-35b-a3b
 assert len(p.workloads) == 5
-assert len(p.engines) == 13
-assert len(p.drafters) == 16  # +gemma-e4b-it-assistant
-assert len(p.calibration) == 6  # +gemma-4-e4b (empty rows, pending real boot)
+assert len(p.engines) == 14
+assert len(p.drafters) == 16  # +dspark
+assert len(p.calibration) == 6
 PY
 
 run_test "fits() happy path: Qwen dual on 2x3090" <<'PY'
@@ -439,6 +439,23 @@ p = load_profiles()
 instances = [
     InstanceSpec("qwen", "vllm/dual", (0, 1), 8010),
     InstanceSpec("gemma", "vllm/gemma-int8-mtp", (2, 3), 8032),
+]
+r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=False)
+assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
+PY
+
+run_test "estate self-test: official Google Gemma QAT TP=4 on 4x3090" <<'PY'
+from pathlib import Path
+from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
+from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+p = load_profiles()
+entry = COMPOSE_REGISTRY["vllm/gemma-31b-multi-google-qat-w4a16"]
+assert entry["drafter"] == "gemma-it-assistant", entry  # n=2 wins the measured n=1..4 sweep
+compose = Path(entry["compose_path"]).read_text()
+assert "${SPEC_N_MAX:-2}" in compose, "production MTP depth drifted from measured n=2"
+assert "MTP_ACCEPT_MIN=${MTP_ACCEPT_MIN:-1.8}" in compose, "Gemma-specific AL floor missing"
+instances = [
+    InstanceSpec("gemma", "vllm/gemma-31b-multi-google-qat-w4a16", (0, 1, 2, 3), 8034),
 ]
 r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=False)
 assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
