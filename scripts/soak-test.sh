@@ -353,6 +353,23 @@ curl -sf -m 10 "${ENDPOINT}/v1/models" -o "$MODELS_JSON" \
   || die "no response from ${ENDPOINT}/v1/models"
 MODEL="${MODEL:-$(python3 "$HELPER" model "$MODELS_JSON")}"
 
+# Which request field turns reasoning off is model-specific, and an unrecognised
+# one is silently ignored — so a family that uses a different switch would reason
+# at full effort for the ENTIRE soak while the run reports itself thinking-off.
+# Resolve it once here and hand soak-helper.py the final JSON via the
+# environment. See preflight.sh::preflight_detect_thinking_control.
+if [[ -f "${REPO_ROOT}/scripts/preflight.sh" ]]; then
+  # shellcheck source=preflight.sh
+  source "${REPO_ROOT}/scripts/preflight.sh"
+fi
+if declare -F preflight_detect_thinking_control >/dev/null; then
+  preflight_detect_thinking_control "$ENDPOINT" "$MODEL"
+else
+  THINK_OFF_KW='{"enable_thinking": false}'; THINK_ON_KW='{"enable_thinking": true}'
+  THINK_OFF_EFFORT=''; THINK_ON_EFFORT=''
+fi
+export THINK_OFF_KW THINK_ON_KW THINK_OFF_EFFORT THINK_ON_EFFORT
+
 TURN_LOG="${SOAK_OUTPUT}/turn-log.csv"
 GPU_LOG="${SOAK_OUTPUT}/gpu-log.csv"
 SUMMARY_MD="${SOAK_OUTPUT}/summary.md"
@@ -480,4 +497,47 @@ python3 "$HELPER" summary "$TURN_LOG" "$SUMMARY_MD" "$BOOT_VRAM_MIB" \
   "$SOAK_MAX_GROWTH_MIB" "$TIMED_OUT" "$SOAK_SESSIONS" "$BASELINE_SESSION"
 rc=$?
 set -e
+
+# --- per-rig #249 record: soak_status + retention/growth from the summary -----
+# rc: 0=PASS, 1=FAIL, 2=INCONCLUSIVE/timeout. soak_status is the frozen pass|fail
+# field (rc==0 -> pass, else fail); the true verdict + p50/retention/growth ride
+# in the extension. resolve-serving maps the running container -> registry slug +
+# fingerprint; host-mode / unmatched runs skip cleanly. SOAK_RECORD=0 skips. Never
+# affects the soak exit code (|| true).
+if [[ "${SOAK_RECORD:-1}" == "1" && -f "$SUMMARY_MD" ]] && command -v python3 >/dev/null 2>&1; then
+  _soak_status="pass"; [[ "$rc" == "0" ]] || _soak_status="fail"
+  _soak_ext="$(python3 - "$SUMMARY_MD" <<'PY' 2>/dev/null || true
+import json, re, sys
+try:
+    txt = open(sys.argv[1], encoding="utf-8").read()
+except OSError:
+    print(""); raise SystemExit(0)
+def m(pat, cast=str):
+    g = re.search(pat, txt)
+    if not g:
+        return None
+    try:
+        return cast(g.group(1))
+    except (TypeError, ValueError):
+        return None
+out = {
+    "verdict": m(r"Verdict:\s*\*\*(\w+)\*\*"),
+    "p50_decode_tps": m(r"\|\s*p50 decode TPS\s*\|\s*([0-9.]+)\s*\|", float),
+    "tps_retention_pct": m(r"\|\s*TPS retention\s*\|\s*([0-9.]+)%", float),
+    "p95_ttft_ms": m(r"\|\s*p95 TTFT\s*\|\s*([0-9.]+)\s*ms", float),
+    "max_growth_mib": m(r"Max growth observed:\s*([0-9]+)\s*MiB", int),
+}
+print(json.dumps({k: v for k, v in out.items() if v is not None}, separators=(",", ":")))
+PY
+)"
+  if [[ -n "$_soak_ext" && "$_soak_ext" != "{}" ]]; then
+    _soak_flag=(--extension "soak=${_soak_ext}")
+  else
+    _soak_flag=()
+  fi
+  python3 "$REPO_ROOT/scripts/lib/profiles/measurement_record.py" \
+    --resolve-serving --serving-url "${URL:-${ENDPOINT:-}}" --bench-output /dev/null --result-class soak-only \
+    --soak-status "$_soak_status" "${_soak_flag[@]}" >/dev/null 2>&1 || true
+fi
+
 exit "$rc"

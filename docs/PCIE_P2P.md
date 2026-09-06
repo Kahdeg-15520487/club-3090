@@ -836,11 +836,37 @@ Everything below was hit for real. Start from the symptom.
 >
 > **Only reading the generated text caught it.** That is strictly worse than a hang, which at least
 > announces itself. Before trusting any verdict in §7, generate real output and read it.
+>
+> ⭐ **You do not have to eyeball it — `verify-full` scans for exactly this.** Step 8/9 (*output
+> quality / cascade detection*) generates a 2000-token essay and computes lexical variety over the
+> first 200 words; the regex matches only alphabetic tokens, so a punctuation-spam completion like
+> `!!!!!!!!!!!!` yields an empty word list → **`variety = 0.000`** → hard fail against the `≥ 0.30`
+> threshold. It independently trips on `max_line_repeat ≥ 5` and on an empty completion.
+>
+> ```bash
+> bash scripts/verify-full.sh      # after any P2P change, before trusting a bench
+> ```
+>
+> ⚠️ **Know its limit.** It catches **degenerate** output — punctuation spam, token repetition,
+> collapse. It does **not** catch *fluent but wrong* output: text that reads naturally while not being
+> conditioned on the prompt scores high variety and passes. #922 and
+> [#751](https://github.com/noonghunna/club-3090/issues/751) both produced the degenerate form, which
+> is why this works for them; a subtler all-reduce corruption could slip past. For that tier use a
+> quality pack or a needle test with a known answer.
+>
+> **The correctness ladder for a P2P bring-up**, weakest to strongest:
+>
+> | tier | what it proves | what it misses |
+> |---|---|---|
+> | `nvidia-smi topo -p2p rw` = OK | the driver *granted* peer access | grant ≠ delivery — it can lie (§4a, #873) |
+> | byte-verified transfer test | data crosses and round-trips | a collective can still be wrong (this section) |
+> | **`verify-full`** | the model still produces *language* | fluent-but-wrong output |
+> | quality pack / needle with known answer | the output is *correct* | — |
 
 
 | symptom | cause | fix |
 |---|---|---|
-| ⚠️⚠️ Collectives **complete**, at a plausible TPS, but the model emits **garbage on every request** (e.g. `!!!!!!!!!!!!` at 18 prompt tokens) over a patched peer path | vLLM's **custom all-reduce** over BAR1 P2P returns WRONG DATA — NCCL itself is fine. aikitoria [#21](https://github.com/aikitoria/open-gpu-kernel-modules/issues/21) class; related `vllm#28334` (IMA in custom AR during graph capture with spec-decode). **NOT universal on Ampere** — a configuration interaction, not "Ampere is broken" | **`--disable-custom-all-reduce`** — keeps NCCL P2P *and* its prefill gain. `NVLINK_MODE=force_off` also works but discards the win. Reported by @juslex ([#922](https://github.com/noonghunna/club-3090/issues/922), 2×3090 + aikitoria `610.43.03-p2p`, measured A/B) |
+| ⚠️⚠️ Collectives **complete**, at a plausible TPS, but the model emits **garbage on every request** (e.g. `!!!!!!!!!!!!` at 18 prompt tokens) over a patched peer path | vLLM's **custom all-reduce** over BAR1 P2P returns WRONG DATA — NCCL itself is fine. aikitoria [#21](https://github.com/aikitoria/open-gpu-kernel-modules/issues/21) class; related `vllm#28334` (IMA in custom AR during graph capture with spec-decode). **NOT universal on Ampere** — a configuration interaction, not "Ampere is broken" | **`--disable-custom-all-reduce`** — keeps NCCL P2P *and* its prefill gain. `NVLINK_MODE=force_off` also works but discards the win. Reported by @juslex + independently reproduced by @fkrutko ([#922](https://github.com/noonghunna/club-3090/issues/922)) on **two** Intel-platform patched-P2P rigs (Z390/Gen3/FP8 · Z690/Gen4/INT4, two driver point-releases) — **reseat-persistent** on both, identical signature (`!!!!` + 0% MTP accept); a Threadripper x16 rig did **not** reproduce. NCCL over the same link stays correct (`p2p-validate.sh` HEALTHY), so the fault is the custom kernel, not the transport |
 | `topo -p2p` = **`CNS`** in a VM | Emulated front host bridge isn't in the driver's chipset table (§4a) | `x-nv-gpudirect-clique` (§4a). **Not** a BAR, driver-flavour or topology problem |
 | `CNS` persists after a **large BAR1** + **open driver** | BAR/driver were never the gate; the chipset table is | Same — clique. Measured: 32 GB BAR1 + `nvidia-open` still `CNS` |
 | `CNS` persists after `NVreg_RegistryDwords` | Those keys relax peer *mapping*, not the chipset verdict | Refuted on-rig. Don't retry |

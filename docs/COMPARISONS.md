@@ -14,7 +14,7 @@ Honest read on when this repo is the right answer and when it isn't. We have a r
 | Model registry | curated `ollama pull` registry | direct from Hugging Face (Unsloth UD-Q3_K_XL exact build) |
 | Engine | llama.cpp under a thin wrapper | vLLM **and** llama.cpp, picked per workload |
 | Configurability | limited — can't expose `--cache-type-k q4_0`, `--mmproj`, `--spec-type ngram-mod`, `--parallel`, custom KV quants | full engine flag access via Docker compose |
-| Reproducibility | model versions move with Ollama's registry | pinned image SHA + Genesis commit + GGUF SHA |
+| Reproducibility | model versions move with Ollama's registry | pinned image SHA + GGUF SHA |
 | GUI / system integration | system tray, desktop app | none — CLI / Docker / OpenAI-compat API only |
 | Tool calling on Qwen3.6-27B | works (Ollama parses `<tool_call>` blocks) | works (vLLM `--tool-call-parser qwen3_coder`, llama.cpp `--jinja`) |
 
@@ -57,7 +57,7 @@ Honest read on when this repo is the right answer and when it isn't. We have a r
 | Model file location | wherever you download | `models-cache/` by default, override via `MODEL_DIR` |
 | Flags | full control | full control (compose forwards every llama-server flag) |
 | Vision setup | manual mmproj path | mmproj wired into compose |
-| Recipe sharing | "here are my exact flags" → comment with config | `bash scripts/switch.sh llamacpp/default` |
+| Recipe sharing | "here are my exact flags" → comment with config | `bash scripts/switch.sh vllm/minimal` (`llamacpp/default` retired 2026-08-12) |
 
 **Pick raw llama.cpp if:** you're already a llama.cpp committer, you need a specific PR branch, you don't trust Docker, or your platform isn't supported by the official image.
 
@@ -114,7 +114,7 @@ Cost isn't always the question. Reasons people self-host even when cloud is chea
 - **Latency floor.** ~120 ms TTFT (our measured) vs cloud's ~300-800 ms typical (network + queue). Tight for IDE-agent flows.
 - **No rate limits.** vLLM dual-card serves 4 concurrent streams indefinitely; cloud APIs throttle at ~10-100 RPM on most plans.
 - **Data residency.** Health, legal, financial workloads where the data can't leave your network.
-- **Customization.** Run with Genesis patches, your own LoRA, your own KV-quant choice. Cloud APIs don't expose these.
+- **Customization.** Run your own LoRA, your own KV-quant choice, your own sampler. Cloud APIs don't expose these.
 - **Predictable cost.** $120 / month flat vs token-metered surprises during a big batch run.
 - **Offline / disconnected.** Demos behind a firewall, edge deployments, dev rigs without reliable internet.
 - **Learning lens.** If you want to *understand* how serving works (cliffs, KV math, spec-decode acceptance), the abstraction in API providers hides this.

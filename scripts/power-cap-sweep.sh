@@ -148,6 +148,18 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 
 set -euo pipefail
 
+# --- per-rig #249 record: self-tee stdout so the per-cap `[result]` lines can be
+# parsed at the end into the TPS-by-power-cap curve for the corpus record.
+# POWER_CAP_SWEEP_RECORD=0 skips. resolve-serving maps the running container ->
+# registry slug + fingerprint; unmatched runs skip cleanly. Emit never fails the
+# sweep (|| true).
+POWER_CAP_SWEEP_RECORD="${POWER_CAP_SWEEP_RECORD:-1}"
+_PCS_REC_LOG=""
+if [[ "${POWER_CAP_SWEEP_RECORD}" == "1" ]] && command -v python3 >/dev/null 2>&1; then
+  _PCS_REC_LOG="$(mktemp 2>/dev/null || echo "/tmp/power-cap-rec.$$.log")"
+  exec > >(tee -a "${_PCS_REC_LOG}")
+fi
+
 # Defaults — override via flags
 GPU_INDEX=0
 GPU_INDEX_SET=0      # set to 1 once --gpu is explicitly passed (distinguishes from the default 0)
@@ -435,6 +447,22 @@ if [ -z "${CONTAINER:-}" ]; then
   CONTAINER="none"
 fi
 
+# Which request field turns reasoning off is model-specific and an unrecognised
+# one is silently ignored, so a sweep on such a model would compare power caps
+# against reasoning-heavy generation while reporting itself thinking-off. The
+# load generator below splats THINK_FRAG_OFF via its _think() helper.
+# See preflight.sh::preflight_detect_thinking_control.
+if [[ -f "$REPO_ROOT/scripts/preflight.sh" ]] && ! declare -F preflight_detect_thinking_control >/dev/null; then
+  # shellcheck source=preflight.sh
+  source "$REPO_ROOT/scripts/preflight.sh"
+fi
+if declare -F preflight_detect_thinking_control >/dev/null; then
+  preflight_detect_thinking_control "${URL:-}" "${MODEL:-}"
+fi
+export THINK_OFF_KW="${THINK_OFF_KW:-{\"enable_thinking\": false\}}"
+export THINK_ON_KW="${THINK_ON_KW:-{\"enable_thinking\": true\}}"
+export THINK_OFF_EFFORT="${THINK_OFF_EFFORT:-}" THINK_ON_EFFORT="${THINK_ON_EFFORT:-}"
+
 if [ -z "${URL:-}" ] || [ -z "${MODEL:-}" ]; then
   echo "[error] could not auto-detect a running URL + MODEL." >&2
   echo "[hint]  start a model server first (bash scripts/switch.sh <variant>)" >&2
@@ -512,6 +540,23 @@ bench_decode_single_request() {
 
   python3 - "$URL" "$MODEL" "$prompt" "$max_tokens" "$kind" "$phase" "$cap" "$log_file" <<'PY'
 import json
+
+# Reasoning switch resolved by the shell (see preflight.sh header) — WHICH key
+# works is model-specific and an unrecognised one is silently ignored. Returns
+# the payload fragment: the kwargs object plus, when the model uses an effort
+# dial, the OpenAI-standard top-level parameter alongside it.
+def _think(on=False):
+    import os as _o, json as _j
+    raw = _o.environ.get("THINK_ON_KW" if on else "THINK_OFF_KW")
+    try:
+        frag = {"chat_template_kwargs": _j.loads(raw) if raw else {"enable_thinking": on}}
+    except Exception:
+        frag = {"chat_template_kwargs": {"enable_thinking": on}}
+    eff = _o.environ.get("THINK_ON_EFFORT" if on else "THINK_OFF_EFFORT") or ""
+    if eff:
+        frag["reasoning_effort"] = eff
+    return frag
+
 import sys
 import time
 import urllib.request
@@ -525,7 +570,7 @@ body = json.dumps({
     "top_p": 0.95,
     "stream": True,
     "stream_options": {"include_usage": True},
-    "chat_template_kwargs": {"enable_thinking": False},
+    **_think(),
 }).encode()
 request = urllib.request.Request(
     f"{url}/v1/chat/completions",
@@ -1753,4 +1798,53 @@ echo "Sweep complete. Summary at: $RESULTS_FILE"
 echo "Raw bench logs at: /tmp/power-cap-N*.log"
 echo "================================================"
 echo
+
+# --- per-rig #249 record: TPS-by-power-cap curve from the `[result]` lines -----
+# No canonical bench TPS shape here (it is its own per-watt table), so a
+# sweep-only record carrying the curve under measured_extensions. Never fails the
+# sweep (|| true). Placed before the cleanup EXIT trap fires (that trap only
+# restores the power cap).
+if [[ -n "${_PCS_REC_LOG:-}" && -f "${_PCS_REC_LOG}" ]]; then
+  sync 2>/dev/null || true
+  sleep 0.4   # let the tee subprocess flush the [result] lines before we read them
+  _pcs_ext="$(PCS_LOG="${_PCS_REC_LOG}" python3 - <<'PY' 2>/dev/null || true
+import json, os, re
+try:
+    txt = open(os.environ["PCS_LOG"], encoding="utf-8", errors="replace").read()
+except OSError:
+    raise SystemExit(0)
+def num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+caps = []
+for ln in txt.splitlines():
+    i = ln.find("[result] ")
+    if i < 0:
+        continue
+    kv = dict(re.findall(r"(\w+)=(\S+)", ln[i + 9:]))
+    caps.append({
+        "cap_w": num((kv.get("cap") or "").rstrip("W")),
+        "actual_w": num(kv.get("actual_W")),
+        "temp_c": num(kv.get("temp")),
+        "sm_clk_mhz": num(kv.get("sm_clk")),
+        "pstate": kv.get("pstate"),
+        "throttle_pwr_pct": num(kv.get("throttle_pwr")),
+        "narr_tps": num(kv.get("narr")),
+        "code_tps": num(kv.get("code")),
+        "tps_per_w": num(kv.get("tps_per_w")),
+    })
+if caps:
+    print(json.dumps({"by_cap": caps}, separators=(",", ":")))
+PY
+)"
+  if [[ -n "$_pcs_ext" ]]; then
+    python3 "${REPO_ROOT}/scripts/lib/profiles/measurement_record.py" \
+      --resolve-serving --serving-url "$URL" --bench-output /dev/null --result-class sweep-only \
+      --extension "tps_by_power_cap=${_pcs_ext}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${_PCS_REC_LOG}"
+fi
+
 cat "$RESULTS_FILE"

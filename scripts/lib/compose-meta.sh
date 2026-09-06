@@ -312,24 +312,53 @@ compose_hw_compose_eligible() {
   [[ "$status" == ok\|* ]]
 }
 
+# _compose_meta_registry_file <repo_root> <slug> <fallback-abs-path>
+#
+# Absolute path of SLUG's registered compose (registry_lookup_compose_path)
+# when the registry resolves AND the file exists on disk; else FALLBACK
+# verbatim. Used by compose_hw_model_status so its probe composes cannot drift
+# from the catalog.
+_compose_meta_registry_file() {
+  local rel=""
+  if declare -F registry_lookup_compose_path >/dev/null 2>&1; then
+    rel="$(registry_lookup_compose_path "$2" 2>/dev/null || true)"
+  fi
+  if [[ -n "$rel" && -f "$1/$rel" ]]; then
+    printf '%s\n' "$1/$rel"
+  else
+    printf '%s\n' "$3"
+  fi
+}
+
 compose_hw_model_status() {
   local repo_root="$1"
   local model="$2"
   local candidates=()
   local friendly_need=""
 
+  # Registry-first candidate resolution, sourced LAZILY: compose-meta.sh is
+  # pulled in by switch.sh / preflight.sh / setup.sh, and none of those should
+  # pay the ~1s registry emit unless THIS display path actually runs. The
+  # literals below stay as fallbacks when the registry can't be consulted.
+  if ! declare -F registry_lookup_compose_path >/dev/null 2>&1 \
+     && [[ -f "${repo_root}/scripts/lib/registry-lookup.sh" ]]; then
+    # shellcheck source=registry-lookup.sh
+    source "${repo_root}/scripts/lib/registry-lookup.sh"
+  fi
+  REGISTRY_LOOKUP_ROOT="${repo_root}"
+
   case "$model" in
     qwen3.6-27b)
       candidates=(
-        "${repo_root}/models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml"
+        "$(_compose_meta_registry_file "$repo_root" vllm/minimal "${repo_root}/models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml")"
       )
       friendly_need="needs 20 GB+ VRAM (24 GB recommended)"
       ;;
     gemma-4-31b)
       candidates=(
-        "${repo_root}/models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16-mtp.yml"
-        "${repo_root}/models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml"
-        "${repo_root}/models/gemma-4-31b/vllm/compose/single/autoround-int4/fp8-mtp.yml"
+        "$(_compose_meta_registry_file "$repo_root" vllm/gemma-bf16-mtp "${repo_root}/models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16-mtp.yml")"
+        "$(_compose_meta_registry_file "$repo_root" vllm/gemma-int8-mtp "${repo_root}/models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml")"
+        "$(_compose_meta_registry_file "$repo_root" vllm/gemma-mtp-tp1 "${repo_root}/models/gemma-4-31b/vllm/compose/single/autoround-int4/fp8-mtp.yml")"
       )
       friendly_need="needs 32 GB+ on single card OR 2× 24 GB"
       ;;
@@ -371,9 +400,22 @@ compose_hw_model_status() {
 #    worth +19% decode — #931). The overhead it absorbed is ADDITIVE (dense split
 #    + drafter half + compute buffers + KV don't scale with card size), so the
 #    model now subtracts it explicitly:
-#      reserve           per-compose header (true per-card engine cost)
+#      reserve           per-compose header (true per-card engine cost, DRAFTER-FREE)
+#      draft_reserve     per-card VRAM the DRAFT MODEL will take (default 0 — see below)
 #      first_card_extra  card 0 carries the larger drafter half + compute buffer
 #                        (measured 660 MiB on 2x5090; default 768)
+#
+#    ⚠️ WHY draft_reserve IS ITS OWN TERM (#953). `reserve` is a STATIC per-compose
+#    constant, and it used to be documented as already covering the "drafter half".
+#    It cannot: the drafter loads AFTER this resolves, so FREE_i is read before the
+#    draft model allocates, and a static number set before that cost was measured
+#    silently understates it. On DeepSeek-Flash-Q8 (2x24 GB) the constant said
+#    18000 MiB while the true per-card cost measured 19586-20028 — which is exactly
+#    enough to flip fit from 0 to 1 on card 0. The sizer then granted a bundle the
+#    engine could not place, and the experts silently stayed on CPU while the RAM
+#    gate priced a bundle that never landed.
+#    Defaults to 0, so every compose WITHOUT the header is bit-identical to before
+#    and the #931 calibration points keep reproducing untouched.
 #      margin            deep-prefill spike headroom. #931 brackets it: a card at
 #                        556 MiB free DIED on a ~90K prefill; 896 MiB survived a
 #                        full 188K NIAH ladder. Default 1024 (RESIDENCY_MARGIN_MB).
@@ -485,6 +527,14 @@ resolve_offload_residency() {
   [[ "$first" =~ ^[0-9]+$ ]] || first=0
   local extra; extra="$(compose_meta_get "$compose_file" cpu-offload-first-card-extra-mib || true)"
   [[ "$extra" =~ ^[0-9]+$ ]] || extra=768
+  # Per-card DRAFT-MODEL VRAM (#953). 0 when absent => no behaviour change for any
+  # compose that does not declare it. Overridable for A/B via RESIDENCY_DRAFT_MB.
+  local draft; draft="$(compose_meta_get "$compose_file" cpu-offload-draft-reserve-mib || true)"
+  [[ "$draft" =~ ^[0-9]+$ ]] || draft=0
+  # ⚠️ plain `if`, NOT `[[ ]] && assign`: the latter returns non-zero when the
+  # condition is false, and every caller runs under `set -e` — that aborts the
+  # launcher mid-resolve. Same trap documented in preflight.sh.
+  if [[ "${RESIDENCY_DRAFT_MB:-}" =~ ^[0-9]+$ ]]; then draft="$RESIDENCY_DRAFT_MB"; fi
 
   local -a frees=()
   while read -r m; do [[ "$m" =~ ^[0-9]+$ ]] && frees+=("$m"); done \
@@ -495,7 +545,7 @@ resolve_offload_residency() {
   local per_card=$(( layers / n ))
   local i fit rule var applied="" res_i
   for (( i=0; i<n; i++ )); do
-    res_i=$(( reserve + (i == 0 ? extra : 0) ))
+    res_i=$(( reserve + draft + (i == 0 ? extra : 0) ))
     # An explicit OT_G<i> from the user/env ALWAYS WINS and is never clobbered —
     # same contract as THREADS (resolve_offload_threads). This is the supported
     # way to pin more residency than the sizer grants (the grant is deliberately
@@ -571,6 +621,14 @@ offload_residency_grant_mib() {
   [[ "$first" =~ ^[0-9]+$ ]] || first=0
   local extra; extra="$(compose_meta_get "$compose_file" cpu-offload-first-card-extra-mib || true)"
   [[ "$extra" =~ ^[0-9]+$ ]] || extra=768
+  # Per-card DRAFT-MODEL VRAM (#953). 0 when absent => no behaviour change for any
+  # compose that does not declare it. Overridable for A/B via RESIDENCY_DRAFT_MB.
+  local draft; draft="$(compose_meta_get "$compose_file" cpu-offload-draft-reserve-mib || true)"
+  [[ "$draft" =~ ^[0-9]+$ ]] || draft=0
+  # ⚠️ plain `if`, NOT `[[ ]] && assign`: the latter returns non-zero when the
+  # condition is false, and every caller runs under `set -e` — that aborts the
+  # launcher mid-resolve. Same trap documented in preflight.sh.
+  if [[ "${RESIDENCY_DRAFT_MB:-}" =~ ^[0-9]+$ ]]; then draft="$RESIDENCY_DRAFT_MB"; fi
 
   local -a frees=()
   local m
@@ -583,7 +641,7 @@ offload_residency_grant_mib() {
   local i fit rule total_mib=0 var ucount res_i
   local -a lays
   for (( i=0; i<n; i++ )); do
-    res_i=$(( reserve + (i == 0 ? extra : 0) ))
+    res_i=$(( reserve + draft + (i == 0 ? extra : 0) ))
     # A user-set OT_G<i> is what will ACTUALLY be pinned (the injector never
     # clobbers it) — price ITS layer count, not the auto fit, so the gate and
     # the boot describe the same config. First hit in the wild: a 123 GB box

@@ -33,10 +33,10 @@ run_test "load_profiles parses all profile groups" <<'PY'
 from scripts.lib.profiles.compat import load_profiles
 p = load_profiles()
 assert len(p.hardware) == 11  # +dgx-spark (#576 follow-up), +rtx-a6000 (#948 thread)
-assert len(p.models) == 16   # +qwen-agentworld-35b-a3b
+assert len(p.models) == 21   # +inkling-small, +qwen3.8-27b, +glm-5.3-flash, +qwen3.8-flash-next, +deepseek-v4-flash-vision-exp
 assert len(p.workloads) == 5
-assert len(p.engines) == 14
-assert len(p.drafters) == 16  # +dspark
+assert len(p.engines) == 17   # +llamacpp-club3090-v1.1, -v1.5, -v1.6
+assert len(p.drafters) == 18  # +syvai-qwen38-dflash2, +anbeeld-glm53-dflash2
 assert len(p.calibration) == 6
 PY
 
@@ -341,6 +341,40 @@ assert "constraints_passed" in d and "constraints_failed" in d and "constraints_
 assert isinstance(d["elapsed_ms"], float)
 PY
 
+run_test "canonical scenarios cover every registry tp" <<'PY'
+# THE UNIFICATION GUARD (added 2026-08-15).
+# CANONICAL_SCENARIOS is a hand-written enumeration; COMPOSE_REGISTRY grows
+# independently. When vllm/qwen38-27b-multi8-max (tp=8) landed, the largest
+# scenario was 4x -- so the self-test below reported 'no fitting canonical
+# scenario' for a slug that diagnose-profile.sh passed at 15/16. The slug was
+# fine; the scenario list simply could not describe an 8-card host.
+#
+# That failure mode is silent and MISLEADING (it reads as a broken compose), so
+# assert coverage directly: every distinct tp in the registry must have at least
+# one canonical scenario with that many GPUs.
+#
+# NOTE: diagnose_profile_cli.py deliberately does NOT read CANONICAL_SCENARIOS --
+# it synthesises a scenario from the entry's own world size. The two answer
+# different questions ('fits some real host' vs 'fits the host it implies'), so
+# they are kept consistent by THIS test rather than by merging them.
+from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+from scripts.lib.profiles.canonical_scenarios import CANONICAL_SCENARIOS
+
+sizes = {len(sc['hardware']) for sc in CANONICAL_SCENARIOS}
+needed = {}
+for name, e in COMPOSE_REGISTRY.items():
+    tp = e.get('tp') if isinstance(e, dict) else getattr(e, 'tp', None)
+    if tp:
+        needed.setdefault(int(tp), []).append(name)
+missing = {tp: slugs for tp, slugs in needed.items() if tp not in sizes}
+for tp in sorted(needed):
+    print(f"  tp={tp}: {len(needed[tp])} slug(s) -> canonical scenario " + ("MISSING" if tp in missing else "ok"))
+assert not missing, (
+    'registry uses tp values with no canonical scenario of that size: '
+    + '; '.join(f"tp={tp} ({', '.join(sorted(s)[:3])})" for tp, s in sorted(missing.items()))
+    + ' -- add a scenario to canonical_scenarios.py'
+)
+PY
 run_test "self-test: all registry entries fit canonical scenarios" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, from_compose_name, calibration_status
 from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
@@ -473,5 +507,111 @@ r = validate_estate(instances, [p.hardware["rtx-3090"]] * 6, p, nvlink_active=Fa
 assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
 PY
 
+run_test "strict keys: every shipped profile group loads under validation" <<'PY'
+from scripts.lib.profiles.compat import load_profiles
+p = load_profiles()  # raises UnknownProfileKeyError on any unknown key
+assert len(p.models) == 21
+PY
+
+run_test "strict keys: typo'd top-level model key fails naming file + closest key" <<'PY'
+import shutil, tempfile
+from pathlib import Path
+from scripts.lib.profiles.compat import load_profiles, UnknownProfileKeyError
+tmp = Path(tempfile.mkdtemp())
+shutil.copytree("scripts/lib/profiles", tmp / "profiles")
+(tmp / "profiles/models/typo.yml").write_text("""schema_version: 1
+id: typo-model
+display_name: Typo
+family: qwen
+hidden_size: 1
+num_hidden_layers: 1
+num_attn_heads: 1
+num_kv_heads: 1
+max_ctx_supported: 1
+attention_k_eq_v: false
+weights: {default: {path: /x, size_gb: 1, format: gguf, status: verified}}
+default_weight_variant: default
+valid_tp: [1]
+descrition: oops
+""")
+try:
+    load_profiles(tmp / "profiles")
+except UnknownProfileKeyError as e:
+    msg = str(e)
+    assert "models/typo.yml" in msg, msg          # names the file
+    assert "descrition" in msg, msg               # names the unexpected key
+    assert "description" in msg, msg              # suggests the closest valid key
+else:
+    raise AssertionError("typo'd top-level key loaded silently")
+PY
+
+run_test "strict keys: typo'd weights-variant verify_glob fails with suggestion" <<'PY'
+import shutil, tempfile
+from pathlib import Path
+from scripts.lib.profiles.compat import load_profiles, UnknownProfileKeyError
+tmp = Path(tempfile.mkdtemp())
+shutil.copytree("scripts/lib/profiles", tmp / "profiles")
+(tmp / "profiles/models/typo.yml").write_text("""schema_version: 1
+id: typo-model
+display_name: Typo
+family: qwen
+hidden_size: 1
+num_hidden_layers: 1
+num_attn_heads: 1
+num_kv_heads: 1
+max_ctx_supported: 1
+attention_k_eq_v: false
+weights:
+  default:
+    path: /x
+    size_gb: 1
+    format: gguf
+    status: verified
+    verify_glb: '*.gguf'
+default_weight_variant: default
+valid_tp: [1]
+""")
+try:
+    load_profiles(tmp / "profiles")
+except UnknownProfileKeyError as e:
+    msg = str(e)
+    assert "models/typo.yml" in msg, msg
+    assert "weights.default" in msg, msg
+    assert "`verify_glb`" in msg and "verify_glob" in msg, msg
+else:
+    raise AssertionError("typo'd verify_glob loaded silently")
+PY
+
+run_test "strict keys: typo'd setup subkey fails with suggestion" <<'PY'
+import shutil, tempfile
+from pathlib import Path
+from scripts.lib.profiles.compat import load_profiles, UnknownProfileKeyError
+tmp = Path(tempfile.mkdtemp())
+shutil.copytree("scripts/lib/profiles", tmp / "profiles")
+(tmp / "profiles/models/typo.yml").write_text("""schema_version: 1
+id: typo-model
+display_name: Typo
+family: qwen
+hidden_size: 1
+num_hidden_layers: 1
+num_attn_heads: 1
+num_kv_heads: 1
+max_ctx_supported: 1
+attention_k_eq_v: false
+weights: {default: {path: /x, size_gb: 1, format: gguf, status: verified}}
+default_weight_variant: default
+valid_tp: [1]
+setup:
+  primarry: default
+""")
+try:
+    load_profiles(tmp / "profiles")
+except UnknownProfileKeyError as e:
+    msg = str(e)
+    assert "setup: unknown key `primarry`" in msg, msg
+    assert "primary" in msg, msg
+else:
+    raise AssertionError("typo'd setup subkey loaded silently")
+PY
 echo ""
 echo "test-profiles-compat: ok"

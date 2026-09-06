@@ -95,7 +95,17 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   source "${ROOT_DIR}/scripts/preflight.sh"
   preflight_autodetect_endpoint || true
 fi
-URL="${URL:-http://localhost:8020}"
+# Default endpoint follows the registry's curated DEFAULTS walk for qwen3.6-27b
+# instead of a hand-maintained :8020/:8010 literal that drifts from the catalog.
+# The trailing literal is only a last resort when the registry can't be consulted.
+_DEFAULT_ENDPOINT_PORT=""
+if [[ -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
+  # shellcheck source=lib/registry-lookup.sh
+  source "${ROOT_DIR}/scripts/lib/registry-lookup.sh"
+  REGISTRY_LOOKUP_ROOT="${ROOT_DIR}"
+  _DEFAULT_ENDPOINT_PORT="$(registry_lookup_default_port qwen3.6-27b 2>/dev/null || true)"
+fi
+URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
 MODEL="${MODEL:-}"
 CONTAINER="${CONTAINER:-}"
 SESSIONS="${SESSIONS:-2}"
@@ -129,8 +139,45 @@ if [[ -z "$MODEL" ]]; then
   exit 1
 fi
 
+# Which request field controls reasoning is model-specific, and an unrecognised
+# one is silently ignored — the model then reasons at full effort while the run
+# reports itself thinking-off. Resolved once by preflight.sh
+# ::preflight_detect_thinking_control and exported as final JSON.
+if declare -F preflight_detect_thinking_control >/dev/null; then
+  preflight_detect_thinking_control
+else
+  THINK_OFF_KW='{"enable_thinking": false}'; THINK_ON_KW='{"enable_thinking": true}'
+  THINK_OFF_EFFORT=''; THINK_ON_EFFORT=''
+fi
+export THINK_OFF_KW THINK_ON_KW THINK_OFF_EFFORT THINK_ON_EFFORT
+
+# --- per-rig #249 record: hand the python block a path to drop a compact curve
+# JSON, which the record emit at the end reads. BENCH_AGENTIC_RECORD=0 skips.
+_BA_CURVE_JSON=""
+if [[ "${BENCH_AGENTIC_RECORD:-1}" == "1" ]] && command -v python3 >/dev/null 2>&1; then
+  _BA_CURVE_JSON="$(mktemp 2>/dev/null || echo "/tmp/bench-agentic-curve.$$.json")"
+  export AGENTIC_CURVE_JSON="$_BA_CURVE_JSON"
+fi
+
 python3 - "$URL" "$MODEL" "$SESSIONS" "$TURNS" "$QUIET" "$FIXTURE" << 'PYEOF'
 import json, os, sys, time, urllib.request, statistics as s, pathlib
+
+# Reasoning switch resolved by the shell (see preflight.sh header) — WHICH key
+# works is model-specific and an unrecognised one is silently ignored. Returns
+# the payload fragment: the kwargs object plus, when the model uses an effort
+# dial, the OpenAI-standard top-level parameter alongside it.
+def _think(on=False):
+    import os as _o, json as _j
+    raw = _o.environ.get("THINK_ON_KW" if on else "THINK_OFF_KW")
+    try:
+        frag = {"chat_template_kwargs": _j.loads(raw) if raw else {"enable_thinking": on}}
+    except Exception:
+        frag = {"chat_template_kwargs": {"enable_thinking": on}}
+    eff = _o.environ.get("THINK_ON_EFFORT" if on else "THINK_OFF_EFFORT") or ""
+    if eff:
+        frag["reasoning_effort"] = eff
+    return frag
+
 sys.stdout.reconfigure(line_buffering=True)  # flush after every \n
 
 URL, MODEL, SESSIONS, TURNS, QUIET, FIXTURE_PATH = sys.argv[1:7]
@@ -224,7 +271,7 @@ def run_turn(messages, fixture_turn, session_id, turn_idx):
         "temperature": 0.3,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "chat_template_kwargs": {"enable_thinking": False},
+        **_think(),
     }).encode()
 
     req = urllib.request.Request(
@@ -541,6 +588,38 @@ if baseline_idx is not None and contiguous[-1] != baseline_idx:
     print(f"  saw degradation above ~35K tokens and timeouts around ~74K; treat those as")
     print(f"  informational per-arch_class guideposts. llama.cpp is not affected.")
 
+# --- #249 record seam: drop a compact per-turn TTFT/decode curve to the path the
+# shell handed us (AGENTIC_CURVE_JSON), for the measurement-record emit at the end
+# of the script. Best-effort — a write failure never affects the bench output.
+_curve_path = os.environ.get("AGENTIC_CURVE_JSON", "")
+if _curve_path:
+    curve = []
+    for _ti in contiguous:
+        _ml = per_turn_metrics[_ti]
+        if not _ml:
+            continue
+        _ttfts = [x["ttft_ms"] for x in _ml]
+        _tpss = [x["decode_tps"] for x in _ml if x["decode_tps"] is not None and x["decode_tps"] > 0]
+        _ptoks = [x["prompt_tokens"] for x in _ml]
+        curve.append({
+            "turn": _ti + 1,
+            "prompt_tokens": round(s.mean(_ptoks)) if _ptoks else None,
+            "ttft_ms": round(s.mean(_ttfts), 1) if _ttfts else None,
+            "decode_tps": round(s.mean(_tpss), 1) if _tpss else None,
+        })
+    _out = {
+        "sessions": SESSIONS,
+        "turns_active": active_turns,
+        "tool_call_misses": tool_call_misses,
+        "granularity": gran,
+        "curve": curve,
+    }
+    try:
+        with open(_curve_path, "w", encoding="utf-8") as _fh:
+            json.dump(_out, _fh, separators=(",", ":"))
+    except OSError:
+        pass
+
 PYEOF
 
 # GPU state
@@ -556,4 +635,26 @@ if command -v docker >/dev/null 2>&1 && docker inspect "${CONTAINER}" >/dev/null
   echo ""
   echo "=== Last 3 SpecDecoding metrics ==="
   docker logs "${CONTAINER}" 2>&1 | grep "SpecDecoding metrics" | tail -3 || true
+fi
+
+# --- per-rig #249 record: the agentic TTFT/decode-by-turn curve (no canonical
+# bench TPS, so an agentic-only record with the curve under measured_extensions).
+# resolve-serving maps the running container -> registry slug + fingerprint;
+# unmatched/bare-metal runs skip cleanly. Never fails the bench (|| true).
+if [[ -n "${_BA_CURVE_JSON:-}" && -f "${_BA_CURVE_JSON}" ]] && command -v python3 >/dev/null 2>&1; then
+  _ba_ext="$(python3 -c '
+import json,sys
+try:
+    d=json.load(open(sys.argv[1],encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+if d.get("curve"):
+    print(json.dumps(d,separators=(",",":")))
+' "${_BA_CURVE_JSON}" 2>/dev/null || true)"
+  if [[ -n "$_ba_ext" ]]; then
+    python3 "${ROOT_DIR}/scripts/lib/profiles/measurement_record.py" \
+      --resolve-serving --serving-url "$URL" --bench-output /dev/null --result-class agentic-only \
+      --extension "agentic_curve=${_ba_ext}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${_BA_CURVE_JSON}"
 fi

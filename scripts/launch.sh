@@ -210,7 +210,6 @@ if [[ $SKIP_PREFLIGHT -eq 0 ]]; then
   preflight_gpu 1  || exit 1
   preflight_gpu_idle
   preflight_running
-  preflight_genesis_pin "${ROOT_DIR}"
   preflight_repo_drift "${ROOT_DIR}"
   echo "[preflight] ok."
   echo ""
@@ -873,18 +872,24 @@ profile_filter_candidates() {
 suggest_default_variant() {
   local cards="${#CARD_INDICES[@]}"
   if [[ "$MODEL_NAME" == "qwen3.6-27b" ]]; then
+    # ⚠️ 2026-08-12: every llama.cpp + ik-llama single-card qwen slug is deprecated,
+    # so there is no functional llamacpp suggestion left to make here — suggesting
+    # one would hand the user a slug that needs --force. Fall through to vLLM.
     if [[ "$ENGINE" == "llamacpp" ]] || { ! model_has_engine "$MODEL_NAME" "vllm" && model_has_engine "$MODEL_NAME" "llamacpp"; }; then
-      echo "llamacpp/default"
+      echo "vllm/minimal"
     elif (( cards >= 4 )); then
       echo "vllm/dual4"
     elif (( cards >= 2 )); then
       echo "vllm/dual"
     else
-      # Single card: llamacpp/default is the recommended path — full 262K, cliff-immune,
-      # and no purged-nightly dependency. The old vllm/long-text suggestion is dead
-      # (#167 image purge + single-card Cliff 2b); vLLM single-card users can still pick
-      # vllm/tools-text explicitly.
-      echo "llamacpp/default"
+      # Single card: vllm/minimal, as of the 2026-08-12 retirement of every
+      # llama.cpp + ik-llama single-card qwen slug. ⚠️ This is a genuine downgrade
+      # from the llamacpp/default it replaces (32K vs 200K ctx, no vision, ~32 vs
+      # ~50 TPS) — it is the only FUNCTIONAL single-card qwen path left, not a
+      # like-for-like substitute. Revisit if a long-context single-card qwen slug
+      # returns. (Earlier history: the vllm/long-text suggestion died with the #167
+      # image purge + single-card Cliff 2b.)
+      echo "vllm/minimal"
     fi
   elif [[ "$MODEL_NAME" == "qwen3.6-40b-deckard" ]]; then
     # Deckard: only one compose (dual llama.cpp MTP). Dual-only (31 GB > 24 GB).
@@ -1329,6 +1334,21 @@ fi
 # --- launch + verify ---
 echo ""
 echo "[launch] selected variant: ${VARIANT}"
+
+# Trim a status_note for terminal display — the #1041 fix, folded into launch.sh
+# (#1042 leftover): registry notes are maintainer-facing and long by design
+# (median ~920 chars, worst 6,116). Dumping a whole one ABOVE the real message
+# buries it; show the opening, cap at ~240 chars, point at the full text. Same
+# trim switch.sh applies in status_gate.
+_note_brief() {
+  local n="${1:-}"
+  [[ -n "$n" ]] || return 0
+  if (( ${#n} <= 240 )); then printf '%s' "$n"; return 0; fi
+  local cut="${n:0:240}"
+  cut="${cut% *}"
+  printf '%s… [truncated — full note: bash scripts/switch.sh --list --all]' "$cut"
+}
+
 # Surface the lifecycle health flag (PR-A) before handing off. The actual gate
 # (caveats notice / (NA) → require --force) lives in switch.sh up_variant, which
 # this script delegates to; this is just a heads-up so the user isn't surprised.
@@ -1337,10 +1357,10 @@ _launch_status_note="${LAUNCH_VARIANT_STATUS_NOTE[$VARIANT]:-}"
 case "$_launch_status" in
   production) ;;
   caveats)
-    echo "[launch] NOTE: this is a ⚠️ production-with-caveats config.${_launch_status_note:+  ${_launch_status_note}}"
+    echo "[launch] NOTE: this is a ⚠️ production-with-caveats config.${_launch_status_note:+  $(_note_brief "${_launch_status_note}")}"
     ;;
   *)
-    echo "[launch] WARNING: this is a (NA: ${_launch_status}) config — not a reliable path.${_launch_status_note:+  ${_launch_status_note}}"
+    echo "[launch] WARNING: this is a (NA: ${_launch_status}) config — not a reliable path.${_launch_status_note:+  $(_note_brief "${_launch_status_note}")}"
     echo "[launch]          switch.sh will require --force (FORCE=1) to bring it up."
     ;;
 esac

@@ -10,7 +10,6 @@
 #   preflight_disk <path> <gb>— free space at path covers <gb> gigabytes
 #   preflight_gpu_idle        — warn if GPUs have significant VRAM already in use
 #   preflight_running         — warn if a club-3090 container is already up
-#   preflight_genesis_pin     — warn if on-disk Genesis tree differs from setup.sh's pin
 #   preflight_repo_drift      — warn if local HEAD is behind origin/master
 #   preflight_compose_hardware— check compose VRAM/GPU-count/SM metadata
 #
@@ -265,8 +264,14 @@ _preflight_hardware_suggestions() {
     echo "[preflight]   - Single 24 GB card: no functional Gemma-4-31B single config (beellama retired 2026-07-27) — nearest: bash scripts/switch.sh vllm/gemma-12b-single-int8-mtp (12B), or run the 31B dual" >&2
     echo "[preflight]   - On 2x 24 GB cards, use:  bash scripts/switch.sh vllm/gemma-31b-dual" >&2
   fi
-  echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh beellama/dflash  (single-card default)" >&2
-  echo "[preflight]   - For maximum compatibility, use:  bash scripts/switch.sh llamacpp/default" >&2
+  # ⚠️ Both suggestions here were stale/dead and are repointed 2026-08-12:
+  #   - beellama/dflash: the beellama engine was RETIRED 2026-07-27 (all 10 slugs
+  #     deprecated) — this line had been advertising a --force-only slug as "the
+  #     single-card default" ever since. Pre-existing bug, fixed here.
+  #   - llamacpp/default: deprecated 2026-08-12 with every other llama.cpp +
+  #     ik-llama single-card qwen slug.
+  # vllm/minimal is now the only FUNCTIONAL single-card qwen path (32K, no vision).
+  echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh vllm/minimal  (single-card default; 32K ctx, no vision)" >&2
   echo "[preflight]   - Explicit bypass:  bash scripts/switch.sh --force ${variant:-<variant>}" >&2
 }
 
@@ -692,6 +697,20 @@ preflight_compose_gpu_fit() {
   echo "[preflight]        Fix: free that VRAM, or lower the ceiling —" >&2
   echo "[preflight]             GPU_MEMORY_UTILIZATION=0.90 bash scripts/switch.sh <variant>" >&2
   echo "[preflight]        — then retry.  (Bypass this check with --force.)" >&2
+    # club-3090#1134: on WSL the advice above is a dead end. nvidia-smi INSIDE the
+    # VM reports "No running processes found" while the card is nearly full,
+    # because the VRAM is held by WINDOWS-side processes it cannot see -- and
+    # `docker ps` will not show them either. A user following the Linux advice
+    # finds nothing and concludes the gate is wrong, then reaches for --force.
+    if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+      echo "[preflight]        WSL DETECTED -- the advice above needs adjusting:" >&2
+      echo "[preflight]          nvidia-smi in WSL says 'No running processes found' even when the card" >&2
+      echo "[preflight]          is full. The VRAM is held on the WINDOWS side and is invisible here;" >&2
+      echo "[preflight]          'docker ps' will not show it. Check Windows Task Manager > Performance" >&2
+      echo "[preflight]          > GPU instead, and close browsers (hardware acceleration), games and" >&2
+      echo "[preflight]          launchers, and anything driving the display." >&2
+      echo "[preflight]          --force does NOT free memory: vLLM will still abort after loading." >&2
+    fi
   if [[ "$force" == "1" ]]; then
     echo "[preflight] WARN:  --force set — launching anyway; vLLM may still abort at the free-memory check." >&2
     return 0
@@ -711,56 +730,9 @@ preflight_running() {
   return 0
 }
 
-# preflight_genesis_pin — warn if scripts/setup.sh's declared GENESIS_PIN
-# differs from the on-disk Genesis tree HEAD. This catches the
-# "user pulled the repo but didn't re-run setup.sh" failure mode where
-# vLLM boots against an outdated Genesis tree (mysterious patch failures
-# at runtime). Sourceable; soft-warning only — caller decides whether
-# to abort. Returns 0 always; emits a [preflight] WARN line on mismatch.
-preflight_genesis_pin() {
-  local repo_root="${1:-${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
-  local setup_script="${repo_root}/scripts/setup.sh"
-  local genesis_dir="${repo_root}/models/qwen3.6-27b/vllm/patches/genesis"
-
-  # If setup.sh isn't here we're in a weird state — skip silently.
-  [[ -f "$setup_script" ]] || return 0
-  # If Genesis hasn't been cloned yet, this isn't a mismatch — it's a
-  # missing-setup case. Skip; setup.sh will handle it on first run.
-  [[ -d "${genesis_dir}/.git" ]] || return 0
-
-  # Parse `GENESIS_PIN="${GENESIS_PIN:-<default>}"` to extract the default.
-  local declared_pin
-  declared_pin=$(grep -E '^GENESIS_PIN=' "$setup_script" 2>/dev/null | head -1 \
-    | sed -E 's/.*:-([^}]+)\}.*/\1/; t; s/.*=//' \
-    | tr -d '"' | tr -d "'")
-  [[ -z "$declared_pin" ]] && return 0
-
-  # Get on-disk HEAD short SHA (matches setup.sh's `git rev-parse --short HEAD`).
-  local ondisk_pin
-  ondisk_pin=$(cd "$genesis_dir" && git rev-parse --short HEAD 2>/dev/null)
-  [[ -z "$ondisk_pin" ]] && return 0
-
-  # Compare. setup.sh declares short-form pins (e.g. 2db18df); on-disk
-  # short SHA from git rev-parse --short matches that form. If declared
-  # pin is full-length, take its prefix matching ondisk's length.
-  local declared_short="${declared_pin:0:${#ondisk_pin}}"
-
-  if [[ "$declared_short" != "$ondisk_pin" ]]; then
-    echo "[preflight] WARN:  Genesis tree out of sync with setup.sh's declared pin." >&2
-    echo "[preflight]          declared (scripts/setup.sh): ${declared_pin}" >&2
-    echo "[preflight]          on-disk (genesis/.git HEAD): ${ondisk_pin}" >&2
-    echo "[preflight]        This usually means you pulled latest club-3090 but" >&2
-    echo "[preflight]        didn't re-run setup.sh. vLLM may boot against an" >&2
-    echo "[preflight]        outdated Genesis tree, causing mysterious patch" >&2
-    echo "[preflight]        failures at runtime (see #32 for an example)." >&2
-    echo "[preflight]        Fix:  bash scripts/setup.sh qwen3.6-27b" >&2
-  fi
-  return 0
-}
-
 # preflight_repo_drift — warn if local HEAD is behind origin/master.
 # Catches the most common stale-setup pattern: user cloned weeks ago, master
-# has moved (Genesis pin bumps, compose changes, vendored patch updates),
+# has moved (compose changes, vendored patch updates, engine pin bumps),
 # they re-run their compose, hit a stale config, and file an issue we
 # already solved on master.
 #
@@ -819,7 +791,6 @@ preflight_repo_drift() {
 
   echo "[preflight] WARN:  Your club-3090 checkout is ${behind} commit(s) behind origin/master." >&2
   [[ -n "$age_str" ]] && echo "[preflight]          (last origin fetch: ${age_str})" >&2
-  echo "[preflight]        Master may have new configs, patches, or Genesis pin bumps." >&2
   echo "[preflight]        Easy upgrade:  bash scripts/update.sh" >&2
   echo "[preflight]        (Will refuse if you have local edits — commit or stash first.)" >&2
   echo "[preflight]        Skip this check:  PREFLIGHT_NO_FETCH=1 bash scripts/launch.sh" >&2
@@ -861,6 +832,15 @@ preflight_hf_token() {
 #
 # Hard error (returns 1) — refuses to proceed if a required model dir is missing.
 # Skip via: PREFLIGHT_NO_COMPOSE_DEPS=1
+#
+# Also runs the #1042 weight-shard preflight: for every model directory the
+# compose mounts that DOES exist, verify the weight files its
+# model.safetensors.index.json references (or, failing that, its numbered
+# -000NN-of-000NN GGUF parts) are actually on disk. Catches the interrupted
+# re-fetch / partial rsync / manual `hf download` divergence that otherwise
+# surfaces as a 53 KB vLLM traceback naming the absent shard near the bottom
+# (club-3090#1042). Existence + count only — never hashes (setup.sh owns
+# integrity). Bypassed by FORCE=1 (--force) or PREFLIGHT_NO_SHARD_CHECK=1.
 _preflight_compose_model_dir() {
   local compose_file="$1"
   local model_dir
@@ -1095,7 +1075,18 @@ _preflight_print_weight_hints() {
       echo "[preflight]     or: MODEL_DIR=${model_dir} ${setup_cmd}" >&2
     fi
     if [[ -n "${WEIGHT_MANUAL_NOTE:-}" ]]; then
-      echo "[preflight]     note: ${WEIGHT_MANUAL_NOTE}" >&2
+        # Trim for terminal display. These notes are maintainer-facing and long by
+        # design (median 554 chars, worst 2,273) — dumping one whole buries the
+        # "Fix:" lines directly above it, which are what the user needs. Same class
+        # as the switch.sh status_note dump fixed in #1041; reported on Discord
+        # 2026-08-17, where a missing-weights preflight printed ~2.3 KB of note.
+        _wmn="${WEIGHT_MANUAL_NOTE}"
+        if (( ${#_wmn} > 220 )); then
+          _wmn="${_wmn:0:220}"
+          _wmn="${_wmn% *}… [truncated — full note: scripts/lib/profiles/models/*.yml]"
+        fi
+        echo "[preflight]     note: ${_wmn}" >&2
+        unset _wmn
     fi
   done < <(_preflight_weight_hint_keys "$model_dir" "$@")
 
@@ -1142,6 +1133,69 @@ _preflight_offer_fetch_missing() {
   PREFLIGHT_NO_FETCH_PROMPT=1 preflight_compose_deps "$compose_file"
 }
 
+# _preflight_shard_scan <dir> — #1042 weight-shard presence scan.
+#
+# Prints one "<kind>:<filename>" line per ABSENT weight file, kind being:
+#   safetensors — named in <dir>/model.safetensors.index.json's weight_map
+#   gpart       — one numbered part of a -000NN-of-000NN GGUF part-set
+# Empty output == nothing missing. Existence + count ONLY, never hashes:
+# setup.sh owns integrity (sha256 per fetch), and re-hashing ~30 GB of
+# weights on every launch is exactly what #1042 rules out.
+#
+# Skips cleanly — empty output, exit 0 — when there is no index AND no
+# GGUF part-pattern: not every checkout has either (single-file safetensors
+# or single-file GGUF), and an absent index is explicitly NOT an error.
+_preflight_shard_scan() {
+  local dir="$1"
+  command -v python3 >/dev/null 2>&1 || return 0
+  [[ -d "$dir" ]] || return 0
+  python3 - "$dir" <<'PY'
+import json, os, re, sys
+
+d = sys.argv[1]
+entries = set(os.listdir(d))
+
+# Case 1 — sharded safetensors: diff weight_map values against disk.
+idx = os.path.join(d, "model.safetensors.index.json")
+if os.path.isfile(idx):
+    weight_map = None
+    try:
+        with open(idx, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            weight_map = data.get("weight_map")
+    except (OSError, ValueError):
+        weight_map = None
+    if isinstance(weight_map, dict):
+        for name in sorted({str(v) for v in weight_map.values()}):
+            if name not in entries:
+                print(f"safetensors:{name}")
+    else:
+        # A present-but-unparseable index usually means the download that
+        # wrote it was interrupted — but this check owns ABSENT shards, not
+        # index health; warn softly and let the engine report its own error.
+        print(f"[preflight] WARN: unparseable {idx} — skipping the shard check", file=sys.stderr)
+    raise SystemExit(0)
+
+# Case 2 — no index, but numbered GGUF parts (-00001-of-000NN): every
+# prefix-group must have ALL parts 1..NN on disk.
+part = re.compile(r"^(?P<prefix>.+)-(?P<num>\d+)-of-(?P<total>\d+)\.gguf$")
+groups = {}
+for entry in sorted(entries):
+    m = part.match(entry)
+    if m:
+        groups[m.group("prefix")] = (
+            int(m.group("total")),
+            max(len(m.group("num")), len(m.group("total"))),
+        )
+for prefix, (total, width) in sorted(groups.items()):
+    for n in range(1, total + 1):
+        name = f"{prefix}-{n:0{width}d}-of-{total:0{width}d}.gguf"
+        if name not in entries:
+            print(f"gpart:{name}")
+PY
+}
+
 preflight_compose_deps() {
   local compose_file="$1"
   if [[ "${PREFLIGHT_NO_COMPOSE_DEPS:-0}" == "1" ]]; then
@@ -1172,6 +1226,11 @@ preflight_compose_deps() {
 
   local missing=()
   local escaped=()
+  # Model dirs that exist and are worth a #1042 shard scan (deduped below):
+  # HF subdirs with a config.json, GGUF/drafter/mmproj parent dirs, SGLang
+  # ${MODEL_DIR}/... volume dirs.
+  local shard_dirs=()
+  local shard_note=0
 
   # Engine detection: llama.cpp composes mount ${MODEL_DIR}:/models and pass
   # `-m /models/<path>` or `--model /models/<path>`; vLLM composes mount
@@ -1228,6 +1287,7 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (llama.cpp GGUF weights)")
       else
         _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
+        shard_dirs+=("$(dirname -- "${model_dir}/${path}")")
       fi
     done
     for path in "${draft_paths[@]}"; do
@@ -1235,6 +1295,7 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (speculative drafter GGUF)")
       else
         _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
+        shard_dirs+=("$(dirname -- "${model_dir}/${path}")")
       fi
     done
     for path in "${mmproj_paths[@]}"; do
@@ -1242,6 +1303,7 @@ preflight_compose_deps() {
         missing+=("${model_dir}/${path} (vision projector)")
       else
         _preflight_escapes_mount "$model_dir" "${model_dir}/${path}" && escaped+=("${model_dir}/${path}")
+        shard_dirs+=("$(dirname -- "${model_dir}/${path}")")
       fi
     done
   else
@@ -1257,6 +1319,9 @@ preflight_compose_deps() {
         seen_subdirs+="${subdir} "
         if [[ ! -f "${model_dir}/${subdir}/config.json" ]]; then
           missing+=("${model_dir}/${subdir}/config.json (HF model)")
+        else
+          # Present enough to scan — the #1042 shard check runs on it below.
+          shard_dirs+=("${model_dir}/${subdir}")
         fi
       fi
     # Char-class must NOT exclude `:` or `}` — model paths can be
@@ -1275,6 +1340,8 @@ preflight_compose_deps() {
       [[ -n "$path" ]] || continue
       if [[ ! -e "${model_dir}/${path}" ]]; then
         missing+=("${model_dir}/${path} (MODEL_DIR volume path)")
+      elif [[ -d "${model_dir}/${path}" ]]; then
+        shard_dirs+=("${model_dir}/${path}")
       fi
     done < <(grep -hoE '\$\{MODEL_DIR[^}]*\}/[^"[:space:]]+' "${compose_files[@]}" || true)
   fi
@@ -1303,6 +1370,31 @@ preflight_compose_deps() {
     return 1
   fi
 
+  # ── #1042 weight-shard preflight ─────────────────────────────────────────
+  # The dirs exist; now verify the weight FILES they need are on disk.
+  # Behind the same guard as the other preflight checks: --force (FORCE=1,
+  # switch.sh) bypasses it deliberately, as does PREFLIGHT_NO_SHARD_CHECK=1.
+  if [[ "${FORCE:-0}" != "1" && "${PREFLIGHT_NO_SHARD_CHECK:-0}" != "1" ]]; then
+    local _sd _shard _seen_shard_dirs=" "
+    for _sd in ${shard_dirs[@]+"${shard_dirs[@]}"}; do
+      [[ "$_seen_shard_dirs" != *" ${_sd} "* ]] || continue
+      _seen_shard_dirs+="$_sd "
+      while IFS= read -r _shard; do
+        [[ -n "$_shard" ]] || continue
+        case "$_shard" in
+          safetensors:*)
+            missing+=("${_sd}/${_shard#safetensors:} (referenced by model.safetensors.index.json)")
+            shard_note=1
+            ;;
+          gpart:*)
+            missing+=("${_sd}/${_shard#gpart:} (missing numbered GGUF part)")
+            shard_note=1
+            ;;
+        esac
+      done < <(_preflight_shard_scan "$_sd")
+    done
+  fi
+
   if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
   fi
@@ -1312,6 +1404,11 @@ preflight_compose_deps() {
     echo "[preflight]   missing: ${item}" >&2
   done
   echo "[preflight]" >&2
+  if [[ "$shard_note" == "1" ]]; then
+    echo "[preflight] The index/part-referenced entries above are absent from disk — the download is incomplete." >&2
+    echo "[preflight] (Existence + count are checked, never hashes.) The re-fetch is resumable:" >&2
+  fi
+
   echo "[preflight] Fix:" >&2
   _preflight_print_weight_hints "$model_dir" "${missing[@]}"
   if _preflight_offer_fetch_missing "$compose_file" "$model_dir" "${missing[@]}"; then
@@ -1503,6 +1600,396 @@ except Exception:
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Resolve WHICH chat_template_kwargs key controls reasoning on the served model.
+# Sets THINK_CONTROL / THINK_OFF_KW / THINK_ON_KW in the caller's scope.
+#
+# The key is NOT universal, and the whole script layer had the Qwen one baked in:
+#   Qwen3.x + most families → {"enable_thinking": false|true}
+#   Inkling (TML)           → {"reasoning_effort": "none"|"high"} — a DIAL
+#                             (none/minimal/low/medium/high/xhigh/max, or a
+#                             float), defaulting to 0.9 "high", NOT a boolean
+#   neither                 → {} (caller decides whether to add budget headroom)
+#
+# Why this exists (found on Inkling-Small 2026-08-12): an unrecognised kwarg is
+# silently IGNORED — no error, no warning. The model then reasons at full effort,
+# and a short-budget check spends its entire allowance on the reasoning preamble
+# before emitting a single content token. verify-full's [3/9] and [5/9] failed
+# structurally on such a model, reporting "Model may be loading badly or wrong
+# chat template" — sending you to debug a template that was in fact correct.
+#
+# ⚠️ Both switches must go in chat_template_kwargs. llama-server does NOT map the
+# top-level OpenAI-standard `reasoning_effort` request parameter into the
+# template; passing it there is silently ignored (measured, same session).
+#
+# ⚠️ THINK_*_KW hold FINAL JSON text, not backslash-escaped source. Callers
+# interpolate them into a double-quoted payload, and bash processes \" escapes
+# BEFORE parameter expansion — an escaped value reaches curl with its
+# backslashes intact and every request 400s.
+#
+# Detection order is deliberate: enable_thinking is checked FIRST so that a
+# template supporting both keeps the exact request shape it has today. This can
+# only add coverage, never change an existing model's result.
+#
+# No-ops when THINK_CONTROL is already set, or when there's no URL / curl /
+# python3 — callers keep working defaults. Overridden by VERIFY_THINK_OFF /
+# VERIFY_THINK_ON (plain JSON objects).
+_preflight_probe_thinking_key() {
+  # ⚠️ THE PROBE'S OWN BUDGET MUST CLEAR THE MINIMUM REASONING, or a
+  # thinking-only model is undetectable BY CONSTRUCTION. At 24 tokens
+  # GLM-5.3-Flash at its lowest level returns finish=length with 98 chars of
+  # reasoning and EMPTY content -- so every level scores 0, the ladder finds no
+  # working level, and the model is declared switch-less. Measured at
+  # reasoning_effort=low: 24 tok -> content='' (length); 256 tok -> content='OK.'
+  # (stop). 256 still discriminates, because a high-effort level burns straight
+  # through it (max: 1367 chars of reasoning, no content, at 300 tok).
+  # Echo the content length a trivial question returns under the given kwargs.
+  # A working off-switch answers in a few tokens; an ignored one burns the whole
+  # budget reasoning and returns empty content.
+  local url="$1" model="$2" kwargs="$3"
+  curl -sf -m 90 "${url%/}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 256, \"temperature\": 0.0, \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
+    | python3 -c "import sys,json; print(len((json.load(sys.stdin)['choices'][0]['message'].get('content') or '').strip()))" 2>/dev/null \
+    || echo 0
+}
+
+_preflight_probe_thinking_reasoning_both() {
+  # Same as the sibling below, but ALSO sends the TOP-LEVEL `reasoning_effort`
+  # field alongside the kwargs — i.e. the exact shape verify-full builds from
+  # THINK_OFF_STD + THINK_OFF_KW. Exists to detect models where the two DISAGREE.
+  local url="$1" model="$2" kwargs="$3" effort="$4"
+  curl -sf -m 90 "${url%/}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 96, \"reasoning_effort\": \"${effort}\", \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
+    | python3 -c "import sys,json; print(len((json.load(sys.stdin)['choices'][0]['message'].get('reasoning_content') or '')))" 2>/dev/null \
+    || echo 0
+}
+
+_preflight_probe_thinking_pair() {
+  # Echo "<content_len>:<reasoning_len>" from ONE request.
+  #
+  # ⚠️ CONTENT PRESENCE DOES NOT DISCRIMINATE EFFORT LEVELS. The sibling probe
+  # asks "Say OK." and checks whether any content came back, and the OFF ladder
+  # used that to decide whether a level turns thinking off. On a trivial prompt
+  # with a workable budget EVERY level answers -- including max -- so the test is
+  # blind exactly where it matters. It also flipped behaviour when the budget was
+  # raised from 24 to 256: at 24 no level answered (ladder ran, found nothing,
+  # model declared switch-less); at 256 the scan's own value answered (gate went
+  # false and the ladder was skipped entirely). Same symptom, different cause.
+  #
+  # "Did thinking stop?" is a question about REASONING length, so ask that.
+  local url="$1" model="$2" kwargs="$3"
+  curl -sf -m 90 "${url%/}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 256, \"temperature\": 0.0, \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)['choices'][0]['message']
+c = (d.get('content') or '').strip()
+r = (d.get('reasoning_content') or d.get('reasoning') or '').strip()
+print(f'{len(c)}:{len(r)}')" 2>/dev/null \
+    || echo "0:0"
+}
+
+_preflight_probe_thinking_reasoning() {
+  # Echo the REASONING length a trivial question returns under the given kwargs.
+  # The sibling probe measures CONTENT — right for proving a value turns thinking
+  # OFF, useless for proving one turns it ON. max_tokens stays tiny so a max-effort
+  # model cannot burn minutes here (GLM at effort=max reasons ~6,050 tokens on a
+  # real prompt; capped at 24 it just emits a preamble).
+  local url="$1" model="$2" kwargs="$3"
+  curl -sf -m 90 "${url%/}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\": \"${model}\", \"messages\": [{\"role\": \"user\", \"content\": \"Say OK.\"}], \"max_tokens\": 96, \"temperature\": 0.0, \"chat_template_kwargs\": ${kwargs}}" 2>/dev/null \
+    | python3 -c "import sys,json; print(len((json.load(sys.stdin)['choices'][0]['message'].get('reasoning_content') or '').strip()))" 2>/dev/null \
+    || echo 0
+}
+
+preflight_detect_thinking_control() {
+  [[ -n "${THINK_CONTROL:-}" ]] && return 0
+  local url="${1:-${URL:-}}"
+  local model="${2:-${MODEL:-}}"
+  THINK_CONTROL="enable_thinking"   # safe default = today's behaviour
+  if [[ -n "$url" ]] && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    local tmpl
+    # 1. Exact — read the live chat template when the engine exposes it
+    #    (llama.cpp /props). Free, and needs no inference.
+    tmpl="$(curl -sf -m 5 "${url%/}/props" 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('chat_template') or '')" 2>/dev/null || true)"
+    if [[ -n "$tmpl" ]]; then
+      case "$tmpl" in
+        *enable_thinking*)  THINK_CONTROL="enable_thinking"  ;;
+        *reasoning_effort*) THINK_CONTROL="reasoning_effort" ;;
+        *)                  THINK_CONTROL="none"             ;;
+      esac
+      # 1b. VERIFY the switch is HONOURED, not merely MENTIONED.
+      #
+      # The scan above proves a template NAMES a key. It does not prove the model
+      # OBEYS it, and those differ in practice:
+      #   - GLM-5.3-Flash (2026-08-29) names `reasoning_effort` but has FORCED
+      #     thinking (vendor: thinking.type=disabled is an ERROR on 5.3/5.3-FLASH).
+      #     The scan set THINK_CONTROL=reasoning_effort, so TOK_SCALE stayed 1 and
+      #     verify-full handed a forced-thinking model a 30-TOKEN budget. 4/9 failed
+      #     — [3] basic, [5] streaming, [7] thinking, [8] quality — every
+      #     empty-content failure being budget exhaustion, while tool-calling passed
+      #     TWICE. The engine was fine; the hint ("Model may be loading badly or
+      #     wrong chat template") pointed at the model. That is exactly the failure
+      #     this file's header describes, reached via the SCAN branch rather than
+      #     the probe branch it was written to cover.
+      #   - An unsupported ENUM VALUE fails the same silent way: `reasoning_effort:
+      #     none` is not valid for the GLM-5.3 family and is dropped without error.
+      #
+      # Same opt-in and the same load-bearing reachability gate as the probe branch
+      # below: MEASUREMENT scripts never reach this (THINK_PROBE unset), and an
+      # unreachable endpoint falls through to the scan's answer rather than being
+      # misread as "no switch" and inflating token budgets 64x.
+      #
+      # ASYMMETRIC ON PURPOSE: a switch that WORKS keeps the scan's control
+      # untouched, so every model passing today keeps its exact request shape
+      # (scenario 3's no-regression promise holds). Only a demonstrably-IGNORED
+      # switch is downgraded to `none` — which is what makes the caller widen its
+      # token budgets instead of blaming the model.
+      # ⚠️ The scan proves a template NAMES a key. Its SILENCE proves nothing:
+      # in endpoint-first mode (--url, no container) there is no template to scan
+      # at all, and a reasoning_effort-only model is then declared switch-less.
+      # That is how a GLM-5.3-Flash run reported `thinking-control=none off={}
+      # on={}` while the dial worked perfectly -- and the resulting TOK_SCALE=64
+      # then masked it on the short checks while [8] still failed. When the scan
+      # comes back empty, ask the SERVER before believing it.
+      if [[ "$THINK_CONTROL" == "none" ]] && [[ "${THINK_PROBE:-0}" == "1" ]] \
+         && [[ -n "$model" ]] && curl -sf -m 5 "${url%/}/v1/models" >/dev/null 2>&1 \
+         && [[ "$(_preflight_probe_thinking_key "$url" "$model" '{"reasoning_effort": "low"}')" != "0" ]]; then
+        THINK_CONTROL="reasoning_effort"
+      fi
+      if [[ "$THINK_CONTROL" != "none" ]] && [[ "${THINK_PROBE:-0}" == "1" ]] \
+         && [[ -n "$model" ]] && curl -sf -m 5 "${url%/}/v1/models" >/dev/null 2>&1; then
+        local _off_probe_kw=""
+        case "$THINK_CONTROL" in
+          enable_thinking)  _off_probe_kw='{"enable_thinking": false}'   ;;
+          reasoning_effort) _off_probe_kw='{"reasoning_effort": "none"}' ;;
+        esac
+        # Ask whether the scan's off-value actually STOPS the reasoning. If it
+        # leaves reasoning behind it is not an off-switch, whatever it is named,
+        # and we must walk the ladder. Asymmetric on purpose, as before: a value
+        # that genuinely silences thinking (rlen 0) keeps the scan's answer and
+        # every model passing today keeps its exact request shape.
+        local _off_pair="" _off_rlen0=0
+        if [[ -n "$_off_probe_kw" ]]; then
+          _off_pair="$(_preflight_probe_thinking_pair "$url" "$model" "$_off_probe_kw")"
+          _off_rlen0="${_off_pair##*:}"
+          [[ "$_off_rlen0" =~ ^[0-9]+$ ]] || _off_rlen0=0
+        fi
+        local _off_clen0="${_off_pair%%:*}"
+        [[ "$_off_clen0" =~ ^[0-9]+$ ]] || _off_clen0=0
+        # Enter the ladder when EITHER signal says the value is not an off-switch:
+        #   rlen > 0  -> it left reasoning behind (the GLM case)
+        #   clen == 0 -> it produced no answer at all (the original "named but
+        #                ignored" case, and the only signal available on engines
+        #                that never expose reasoning_content -- vLLM inlines
+        #                thinking in content, so rlen is always 0 there and a
+        #                reasoning-only test would be blind).
+        # A genuine off-switch (rlen 0 AND clen > 0) still keeps the scan's answer.
+        if [[ -n "$_off_probe_kw" ]] && { (( _off_rlen0 > 0 )) || (( _off_clen0 == 0 )); }; then
+          # ⚠️ "this VALUE did not work" is NOT "this KEY does not exist" — the
+          # distinction caused a real misdiagnosis. `reasoning_effort: none` is
+          # INVALID on the GLM-5.3 family (vendor lists max|high|low only) and is
+          # silently ignored, so probing ONLY `none` declared GLM switch-less.
+          # Downstream that set THINK_OFF_KW={} — no switch on any check — and
+          # verify-full's [8] then spent its entire budget reasoning and failed with
+          # "empty completion", blaming the model rather than the probe value.
+          # So before giving up on an effort DIAL, try the other documented minimum.
+          # `low` is valid for GLM-5.3/5.3-Flash and is a listed level in llama.cpp's
+          # own --reasoning-effort help (minimal|low|medium|high|xhigh|max).
+          # ⚠️ WALK A LADDER, DO NOT HARDCODE A LEVEL. Valid levels differ per
+          # family and the dial is not always monotonic:
+          #   GLM-5.3       — `none` INVALID (max|high|low only); `high` measured
+          #                   beside `low` (11 ch vs 0), so `high` is NOT "on".
+          #   Qwen3.8-27B   — template FORCES xhigh and remaps high -> xhigh.
+          # llama.cpp's own --reasoning-effort help lists the level set:
+          #   minimal | low | medium | high | xhigh | max
+          # OFF ladder: first level that lets a 24-token reply produce CONTENT.
+          # ON  ladder: first level that produces REASONING.
+          # A model whose first candidate works is unaffected — the ladder stops there.
+          if [[ "$THINK_CONTROL" == "reasoning_effort" ]]; then
+            local _lvl
+            # ⚠️ PICK BY REASONING, NOT BY "IT ANSWERED". Taking the first level
+            # that returns content picks whichever is tried first, because on a
+            # trivial prompt every level answers. Probe all candidates and keep the
+            # one that reasons LEAST while still producing an answer -- that is the
+            # closest thing to "off" the model actually offers. For GLM-5.3-Flash
+            # only low|high are valid and everything else coerces to max, so
+            # `minimal` and `medium` reason heavily and `low` wins on merit rather
+            # than on loop order.
+            local _lvl _pair _clen _rlen _best_rlen=-1
+            for _lvl in minimal low medium; do
+              _pair="$(_preflight_probe_thinking_pair "$url" "$model" "{\"reasoning_effort\": \"${_lvl}\"}")"
+              _clen="${_pair%%:*}"; _rlen="${_pair##*:}"
+              [[ "$_clen" =~ ^[0-9]+$ ]] || continue
+              [[ "$_rlen" =~ ^[0-9]+$ ]] || continue
+              (( _clen > 0 )) || continue          # produced no answer -- unusable
+              if (( _best_rlen < 0 || _rlen < _best_rlen )); then
+                _best_rlen="$_rlen"; THINK_EFFORT_OFF_VALUE="$_lvl"
+              fi
+              (( _rlen == 0 )) && break            # a true off-switch; stop looking
+            done
+            # Reuse the winning measurement rather than spending another request.
+            (( _best_rlen > 0 )) && THINK_ALWAYS_ON=1
+            if [[ -z "${THINK_EFFORT_OFF_VALUE:-}" ]]; then
+              THINK_CONTROL="none"
+            else
+              # ⚠️ THE BAR MUST MATCH THE CONSUMER'S. verify-full [7] fails a level
+              # whose reasoning is <50 chars ("suspiciously short"). An earlier
+              # revision accepted ANY non-zero reasoning, so the ladder blessed
+              # GLM's `high` on ~11 chars and [7] then REJECTED the value the probe
+              # had just chosen — probe and check disagreeing about what "thinking
+              # is on" means. 50 is that consumer's threshold; the probe budget
+              # above is sized to clear it comfortably (96 tok >> 50 chars).
+              local _min_reasoning=50 _rlen
+              for _lvl in high xhigh max; do
+                _rlen="$(_preflight_probe_thinking_reasoning "$url" "$model" "{\"reasoning_effort\": \"${_lvl}\"}")"
+                if [[ "$_rlen" =~ ^[0-9]+$ ]] && (( _rlen >= _min_reasoning )); then
+                  THINK_EFFORT_ON_VALUE="$_lvl"; break
+                fi
+              done
+            fi
+          else
+            THINK_CONTROL="none"
+          fi
+        fi
+      fi
+    elif [[ "${THINK_PROBE:-0}" == "1" ]] && [[ -n "$model" ]] && curl -sf -m 5 "${url%/}/v1/models" >/dev/null 2>&1; then
+      # 2. Behavioural probe for engines that don't expose the template (vLLM,
+      #    SGLang). At most two tiny requests, and only when step 1 no-ops.
+      #
+      # ⚠️ OPT-IN via THINK_PROBE=1, and deliberately so: this fires REAL
+      # inference requests. Functional checks (verify / verify-full) opt in
+      # because one extra request is harmless there. MEASUREMENT scripts
+      # (bench, soak, power-cap-sweep, quality-test) must NOT, for two reasons:
+      # it puts uncontrolled requests on the server before warmup, and against
+      # a scripted/mocked endpoint it consumes responses the run expects —
+      # which is exactly how it broke the soak fixtures, silently shifting
+      # every turn's response by two.
+      #
+      # ⚠️ The /v1/models reachability gate above is load-bearing. The probe
+      # reads "empty content" as "this switch is ignored", and a request that
+      # never reached the server also returns empty — so without the gate an
+      # unreachable or still-warming endpoint is misread as "model has no
+      # reasoning switch", which both changes the request shape and (in
+      # verify-full) inflates token budgets by 64×. Unreachable must fall
+      # through to the safe default instead, and let the caller's own
+      # reachability check surface the real outage.
+      if [[ "$(_preflight_probe_thinking_key "$url" "$model" '{"enable_thinking": false}')" != "0" ]]; then
+        THINK_CONTROL="enable_thinking"
+      elif [[ "$(_preflight_probe_thinking_key "$url" "$model" '{"reasoning_effort": "none"}')" != "0" ]]; then
+        THINK_CONTROL="reasoning_effort"
+      else
+        THINK_CONTROL="none"
+      fi
+    fi
+  fi
+  # THINK_*_STD is the OpenAI-standard TOP-LEVEL parameter, emitted as a JSON
+  # fragment (trailing comma included) to sit alongside the kwargs object.
+  #
+  # `reasoning_effort` IS the standard, and Thinking Machines' own API takes it
+  # top-level (tinker-docs "compatible-apis/openai"): none/minimal/low/medium/
+  # high/xhigh or a float in [0.0, 0.99], default 0.9. We send it — but we
+  # cannot send it ALONE, because llama.cpp only half-implements it:
+  #
+  #   server-common.cpp: if (reasoning_effort == "none") inputs.enable_thinking = false;
+  #                      // other reasoning_effort values are model-specific and not yet handled
+  #
+  # i.e. the one handled value is mapped onto `enable_thinking`, a template
+  # variable this family does NOT read, and every other value is dropped
+  # silently. So on llama.cpp the chat_template_kwargs copy is what actually
+  # reaches the template. Sending both is verified non-conflicting (measured
+  # 2026-08-12: none → 10 tok / 0 reasoning; high → 45 tok / 152 chars) and
+  # makes the request correct on engines that DO implement the standard.
+  # Drop the kwargs fallback once llama.cpp forwards the value into the template.
+  # THINK_*_EFFORT are the same top-level value as a PLAIN string (empty when the
+  # model has no effort dial), for consumers that build their payload in Python
+  # rather than by string-splicing JSON — they set req["reasoning_effort"] from
+  # it directly instead of parsing the fragment above.
+  THINK_OFF_STD=''
+  THINK_ON_STD=''
+  # 1 = model always reasons, even at its lowest level (dial, but no OFF).
+  THINK_ALWAYS_ON="${THINK_ALWAYS_ON:-0}"
+  THINK_EFFORT_OFF_VALUE="${THINK_EFFORT_OFF_VALUE:-}"
+  THINK_EFFORT_ON_VALUE="${THINK_EFFORT_ON_VALUE:-}"
+  THINK_OFF_EFFORT=''
+  THINK_ON_EFFORT=''
+  case "$THINK_CONTROL" in
+    reasoning_effort)
+      # The OFF value is whatever the probe PROVED works — `none` by default, `low`
+      # on families where `none` is not a valid level (GLM-5.3). Hardcoding `none`
+      # here is what silently disabled the switch on those models.
+      _eoff="${THINK_EFFORT_OFF_VALUE:-none}"
+      _eon="${THINK_EFFORT_ON_VALUE:-high}"
+      THINK_OFF_KW="{\"reasoning_effort\": \"${_eoff}\"}"
+      THINK_ON_KW="{\"reasoning_effort\": \"${_eon}\"}"
+      THINK_OFF_STD="\"reasoning_effort\": \"${_eoff}\", "
+      THINK_ON_STD="\"reasoning_effort\": \"${_eon}\", "
+      THINK_OFF_EFFORT="${_eoff}"
+      THINK_ON_EFFORT="${_eon}"
+      # ⚠️⚠️ DOES THE TOP-LEVEL FIELD DEFEAT THE KWARG? Probe, never assume.
+      # Some models read `reasoning_effort` from the CHAT TEMPLATE and ignore
+      # `enable_thinking` — which is what llama.cpp translates the TOP-LEVEL
+      # field into (server-common.cpp). On those, sending BOTH makes the
+      # top-level one win and the kwarg never takes effect, so a caller that
+      # believes it disabled thinking gets a reasoning-only reply.
+      # MEASURED on Inkling-Small 2026-08-29 (identical prompt, 30-tok budget):
+      #     kwarg only      ->   0 ch reasoning, correct content
+      #     top-level only  -> 132 ch reasoning, EMPTY content
+      #     BOTH            -> 132 ch reasoning, EMPTY content  (== top-level)
+      # verify-full sends BOTH, so [3]/[5] failed on a healthy model.
+      # Keep the top-level fragment ONLY where it does no harm.
+      if [[ -n "${url:-}" && -n "${model:-}" ]]; then
+        local _r_kw _r_both
+        _r_kw="$(_preflight_probe_thinking_reasoning "$url" "$model" "$THINK_OFF_KW")"
+        _r_both="$(_preflight_probe_thinking_reasoning_both "$url" "$model" "$THINK_OFF_KW" "$_eoff")"
+        if [[ "$_r_kw" =~ ^[0-9]+$ && "$_r_both" =~ ^[0-9]+$ ]] \
+           && (( _r_kw < 20 )) && (( _r_both >= 20 )); then
+          THINK_OFF_STD=''
+          THINK_PAYLOAD_NOTE="kwargs-only (top-level field defeats the kwarg: ${_r_kw}ch vs ${_r_both}ch)"
+        fi
+      fi ;;
+    none)
+      THINK_OFF_KW='{}'
+      THINK_ON_KW='{}' ;;
+    *)
+      THINK_OFF_KW='{"enable_thinking": false}'
+      THINK_ON_KW='{"enable_thinking": true}' ;;
+  esac
+  # An explicit override is the full statement of intent — it replaces the
+  # detected kwargs AND suppresses the top-level fragment, so the two can't
+  # disagree in the same request.
+  [[ -n "${VERIFY_THINK_OFF:-}" ]] && { THINK_OFF_KW="${VERIFY_THINK_OFF}"; THINK_OFF_STD=''; THINK_OFF_EFFORT=''; THINK_CONTROL="${THINK_CONTROL} (off overridden)"; }
+  [[ -n "${VERIFY_THINK_ON:-}"  ]] && { THINK_ON_KW="${VERIFY_THINK_ON}";   THINK_ON_STD='';  THINK_ON_EFFORT='';  THINK_CONTROL="${THINK_CONTROL} (on overridden)"; }
+  # THINK_FRAG_* is the COMPLETE request fragment as one JSON object — the kwargs
+  # plus, when applicable, the top-level standard parameter. Python consumers
+  # splat it into their payload in a single uniform line:
+  #   **json.loads(os.environ.get("THINK_FRAG_OFF") or '{"chat_template_kwargs": {"enable_thinking": false}}')
+  # ⚠️ Build these with plain assignments, NEVER `X="$(cond && printf …)"`. Under
+  # `set -e` (every caller) a command substitution whose last command fails makes
+  # the ASSIGNMENT return non-zero, which aborts the function mid-way — leaving
+  # THINK_* half-set and taking the calling script down with it. That is not
+  # theoretical: it broke 10 test suites in one commit.
+  local _off_extra='' _on_extra=''
+  if [[ -n "$THINK_OFF_EFFORT" ]]; then _off_extra=", \"reasoning_effort\": \"${THINK_OFF_EFFORT}\""; fi
+  if [[ -n "$THINK_ON_EFFORT"  ]]; then _on_extra=", \"reasoning_effort\": \"${THINK_ON_EFFORT}\""; fi
+  THINK_FRAG_OFF="{\"chat_template_kwargs\": ${THINK_OFF_KW}${_off_extra}}"
+  THINK_FRAG_ON="{\"chat_template_kwargs\": ${THINK_ON_KW}${_on_extra}}"
+  # Announce ONLY when the answer is non-default. For every model that already
+  # used the Qwen key this function is now completely silent, so output-drift
+  # guards (test-soak-decode-basis compares stdout against origin/master) and
+  # anything else parsing these logs stay byte-identical. A surprising answer is
+  # worth a line; confirming the status quo is not.
+  if [[ "$THINK_CONTROL" != "enable_thinking" ]]; then
+    echo "[autodetect] thinking-control='${THINK_CONTROL}' off=${THINK_OFF_KW} (set VERIFY_THINK_OFF/ON to override)" >&2
+  fi
+  return 0
+}
+
 # ── #633 — ik-llama cu13/cu12 driver-aware image selection ────────────────────
 # The pinned cu13 ik-llama image has a CUDA 13.2 runtime; on a driver whose
 # supported CUDA < 13.2 the forward-compat path fails on GeForce (CUDA error
@@ -1668,6 +2155,59 @@ preflight_offload_split_mode() {
   return 0
 }
 
+# preflight_offload_thp <compose_file>
+# WARN-ONLY hint: an offload compose on a host whose transparent hugepages do not
+# cover Shmem pays a first-token LATENCY cost.
+#
+# ⚠️ This is LATENCY, never throughput. Measured 2026-08-30 on GLM-5.3-Flash:
+# short-prompt TTFT ~593 -> ~262 ms (-56%), decode -0.2%, prefill +0.9%/-2.7%.
+# Wording that implies tok/s would be a false promise, so it does not.
+#
+# NEVER blocks: the rig runs correctly either way, and a hard failure over a
+# latency hint would be user-hostile. Scoped to offload composes only — it is
+# irrelevant to a GPU-resident model and would be pure noise there.
+preflight_offload_thp() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  is_cpu_offload_compose "$compose_file" || return 0   # not an offload compose -> no-op
+
+  # Resolve the lib via SCRIPT_DIR, but FALL BACK to this file's own directory.
+  # A caller with an unexpected SCRIPT_DIR would otherwise disable the check
+  # silently — the exact failure shape this guard exists to catch.
+  local lib="${SCRIPT_DIR:-}/lib/thp.sh"
+  if [[ ! -r "$lib" ]]; then
+    lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/thp.sh"
+  fi
+  [[ -r "$lib" ]] || return 0
+  # shellcheck source=/dev/null
+  . "$lib"
+
+  local shmem_knob cov
+  shmem_knob="$(thp_setting shmem_enabled)"
+  cov="$(thp_shmem_coverage_pct)"
+
+  # `shmem_enabled` is the knob that governs the experts. `enabled` is NOT a
+  # substitute and looking at it is how this gets misdiagnosed.
+  if [[ "$shmem_knob" == "never" ]]; then
+    echo "[preflight] WARN:  transparent_hugepage/shmem_enabled=never — CPU-offloaded experts will" >&2
+    echo "            run on 4 KiB pages. Costs FIRST-TOKEN LATENCY (measured -56% TTFT on short" >&2
+    echo "            prompts when fixed); throughput is unaffected, so this is not a tok/s issue." >&2
+    echo "            Fix: bash scripts/hugepages.sh --apply   # then RESTART the container" >&2
+    echo "            (already-mapped 4 KiB memory does not merge; verify with ShmemHugePages)" >&2
+    return 0
+  fi
+
+  # Coverage empty => no large Shmem resident => nothing to judge (not a finding).
+  if [[ -n "$cov" ]] && [[ "$cov" -lt 50 ]]; then
+    echo "[preflight] WARN:  hugepage coverage of Shmem is ${cov}% despite shmem_enabled=${shmem_knob}." >&2
+    echo "            The knob is set but the kernel could not supply huge pages — usually" >&2
+    echo "            fragmentation on a long-uptime host. Affects first-token latency only." >&2
+    echo "            Fix: restart the container; if it persists, compact memory before loading:" >&2
+    echo "            sync && echo 3 | sudo tee /proc/sys/vm/drop_caches && echo 1 | sudo tee /proc/sys/vm/compact_memory" >&2
+  fi
+  return 0
+}
+
 # preflight_cpu_offload_ram <compose_file>
 # Guards an offload compose against a host that cannot hold the experts.
 #
@@ -1733,8 +2273,20 @@ preflight_cpu_offload_ram() {
     echo "            It cannot run here." >&2
     echo "            This is a hard gate, not a tuning knob: below it the box thrashes or OOMs." >&2
     echo "            Fix: use a lower-bit tier (the IQ2 slug needs ~86 GB), add RAM, or pick a" >&2
-    echo "            model that fits VRAM. On a 4-card rig the same model needs LESS host RAM," >&2
-    echo "            because residency moves expert bytes onto the GPUs." >&2
+    echo "            model that fits VRAM." >&2
+    # ⚠️ "more cards => less host RAM" holds ONLY for composes that can pin expert
+    # bundles back onto the GPUs, i.e. ones carrying the residency headers. The
+    # moe-cache composes pin NOTHING (their -ot is an unconditional =CPU catch-all;
+    # the expert cache is a VRAM-side copy, so the CPU master buffer stays whole).
+    # Printing the hint there sends a RAM-short user shopping for GPUs that cannot
+    # help. Key off the same header the sizer uses, not the model name.
+    if [[ "$(compose_meta_get "$compose_file" cpu-offload-bundle-mib || true)" =~ ^[0-9]+$ ]]; then
+      echo "            On a rig with more cards the same model needs LESS host RAM, because" >&2
+      echo "            residency moves expert bytes onto the GPUs." >&2
+    else
+      echo "            NOTE: more GPUs will NOT lower this compose's host-RAM need — it keeps" >&2
+      echo "            every expert on the CPU regardless of card count." >&2
+    fi
     return 1
   fi
   if (( avail_gb < need_gb )); then

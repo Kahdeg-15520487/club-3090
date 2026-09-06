@@ -6,6 +6,8 @@
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   MTP n=2 (--spec-type draft-mtp; our on-rig A/B peak. Card recommends n=3 — within
 #              noise of 2 here; MTP_DRAFT_N_MAX=3 matches the card exactly)
+#              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
+#              (removes the flags — n-max=0 would leave the draft context allocated)
 #   KV:        q4_0 K + q4_0 V (per card; densest mainline, Ampere-fast)
 #   Vision:    no (text-only; repo ships no mmproj)
 #   Template:  native (GGUF-embedded) via --jinja
@@ -17,26 +19,10 @@
 #              128-188K is engine-proven but past the card's validated window. Full 262K usable
 #              needs beellama's unified KV (slower). CTX_SIZE=131072 for strict card-compliance.
 #   Genesis:   N/A — llama.cpp engine; Genesis is vLLM/Qwen3-Next-specific
-#   Status:    🧪 EXPERIMENTAL — FULL rebench-full VALIDATED 2026-06-18 (--with-8pack-thinking=both).
-#              Mainline b9246 loads the embedded MTP head clean. Bench @370W (n=5, CV<2%): NARRATIVE
-#              47.4/47.9 · CODE 54.2/55.3 wall/decode · PP 1030 tok/s; @230W cap 28.5/32.9 (mainline
-#              -42% 370->230W — power-sensitive). verify-stress 8/8 (NIAH→183K). 8-pack 104/150
-#              think-off · 106/150 think-on (cohort: carnice 110, ik 107, qwopus 103). soak PASS
-#              (0 growth, 0/100 silent-empty, p50 54.5, 102% retention). The MTP head is NOT weaker
-#              than base: a matched-power A/B (230W) put it DEAD-EVEN with base Qwen3.6-27B MTP
-#              (73% vs 72% accept, identical decode); 47.9/55.3 @370W ~on par with base 50.3/58.9
-#              (within ~5% on canonical prompts). MTP gives ~+43% over no-MTP.
-#   Caveats:   (1) POWER-SENSITIVE: the 47.9/55.3 headline is @370W; the rig's default 230W cap gives
-#                  ~28.5/32.9 (not comparable to 370W BENCHMARKS rows unless matched). Stays 🧪 /
-#                  --force as a community GGUF; quality is fully validated above.
-#                  Launch requires --force.
-#              (2) ships 200K-alloc → ~188K usable (MEASURED, needle-recalled), but that is past
-#                  the author's 128K tested window — retrieval works to ~188K, full generative
-#                  quality >128K is unverified (CTX_SIZE=131072 for the strict card window). The
-#                  full 262K usable is beellama-only (unified KV, ~25% slower); mainline OOMs
-#                  at ~176K if you alloc 262K — keep CTX_SIZE<=200000.
-#              (3) Defaults to reasoning ON (this is a reasoning fine-tune); flip REASONING=off
-#                  for plain/agentic use. Decode is ~identical thinking on vs off.
+#   Status:    🗑️ Deprecated
+#   Caveats:   provider retired 2026-08-11 — bytkim fine-tune never downloaded to this rig and is withdrawn from the catalog.
+#              Registry entry is RETAINED (deprecated != deleted) so launch-compat
+#              and pull-gate assertions on its hardware fields stay meaningful.
 #   Engine-profile: llama-cpp-local
 #   Best for:  single-card Pi-style coding / terminal agents (repo work, debugging, tool-heavy) —
 #              ~29 prose / ~33 code decode TPS (short-prompt) + MTP, ~188K usable context
@@ -96,6 +82,48 @@ services:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     # -np 1 is intentional on a single 24 GB card — extra slots divide a compute-bound GPU
     # and -np>1 auto-disables MTP + can OOM the spec-context buffer.
+    environment:
+      # Drafter toggle - docker forwards only what is declared here.
+      - SPEC_N=${SPEC_N:-}
+      - SPEC=${SPEC:-}
+    # The image ENTRYPOINT is ["/app/llama-server"] on every engine we ship
+    # (mainline, ik-llama, beellama, llamacpp-club3090 — all verified). This
+    # wrapper is equivalent to it plus the drafter toggle.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # -- Drafter toggle: the same contract on every club-3090 compose --------
+        #   SPEC_N=<n>  drafter depth; SPEC_N=0 disables
+        #   SPEC=off    back-compat alias for SPEC_N=0
+        # Disabling REMOVES the drafter flags rather than passing n=0. At
+        # --spec-draft-n-max 0 llama.cpp sets drafting=false but still builds the
+        # draft context (server-context.cpp), and still loads an external draft
+        # model when one is named -- so the memory stays spent. Removing the
+        # flags is the only clean off. A non-numeric SPEC_N is a hard error, so a
+        # typo can never masquerade as a silent "drafter off".
+        _spec_n="$${SPEC_N:-1}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        if [ "$$_spec_n" -gt 0 ]; then
+          echo "[spec] drafter ON (SPEC_N=$$_spec_n)" >&2
+          exec /app/llama-server "$$@"
+        fi
+        ARGS=(); _skip=0
+        for _a in "$$@"; do
+          if [ "$$_skip" = 1 ]; then _skip=0; continue; fi
+          case "$$_a" in
+            --spec-type|--spec-draft-model|--spec-draft-n-max|--spec-draft-n-min|-md|--model-draft) _skip=1; continue ;;
+          esac
+          ARGS+=("$$_a")
+        done
+        echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - drafter flags removed" >&2
+        exec /app/llama-server "$${ARGS[@]}"
+      - --
     command: >-
       --host 0.0.0.0
       --port 8080
@@ -109,7 +137,7 @@ services:
       --cache-type-v ${KV_TYPE:-q4_0}
       -np ${NP:-1}
       --spec-type draft-mtp
-      --spec-draft-n-max ${MTP_DRAFT_N_MAX:-2}
+      --spec-draft-n-max ${SPEC_N:-${MTP_DRAFT_N_MAX:-2}}
       --jinja
       --reasoning ${REASONING:-on}
       --reasoning-format ${REASONING_FORMAT:-deepseek}

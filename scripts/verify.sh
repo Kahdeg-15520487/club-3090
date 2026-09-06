@@ -13,7 +13,8 @@
 # troubleshooting section.
 #
 # Env vars (optional):
-#   URL          Override endpoint. Default: http://localhost:8020
+#   URL          Override endpoint. Default: registry-derived for qwen3.6-27b
+#                (curated DEFAULTS walk; currently :8020)
 #   MODEL        Served model name. Default: qwen3.6-27b
 #   CONTAINER    Docker container name for log scraping. Default: vllm-qwen36-27b
 
@@ -36,12 +37,51 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   source "${ROOT_DIR}/scripts/preflight.sh"
   preflight_autodetect_endpoint
 fi
-URL="${URL:-http://localhost:8020}"
+# Default endpoint follows the registry's curated DEFAULTS walk for qwen3.6-27b
+# instead of a hand-maintained :8020/:8010 literal that drifts from the catalog.
+# The trailing literal is only a last resort when the registry can't be consulted.
+_DEFAULT_ENDPOINT_PORT=""
+if [[ -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
+  # shellcheck source=lib/registry-lookup.sh
+  source "${ROOT_DIR}/scripts/lib/registry-lookup.sh"
+  REGISTRY_LOOKUP_ROOT="${ROOT_DIR}"
+  _DEFAULT_ENDPOINT_PORT="$(registry_lookup_default_port qwen3.6-27b 2>/dev/null || true)"
+fi
+URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
 # Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
 # literal below is only a last resort if detection no-ops (endpoint unreachable).
 declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
 MODEL="${MODEL:-qwen3.6-27b}"
+if [[ -z "${CONTAINER:-}" && -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
+  # The old literal default 'vllm-qwen36-27b' matches NO registry container, so
+  # container-coupled checks silently no-op'd on an undetected endpoint. Default
+  # to the MODEL's curated-default slug container instead (qwen3.6-27b →
+  # vllm/minimal → vllm-qwen36-27b-minimal); the dead literal stays only as a
+  # last-resort fallback when the registry can't be consulted.
+  # shellcheck source=lib/registry-lookup.sh
+  source "${ROOT_DIR}/scripts/lib/registry-lookup.sh"
+  REGISTRY_LOOKUP_ROOT="${ROOT_DIR}"
+  CONTAINER="$(registry_lookup_default_container "$MODEL" 2>/dev/null || true)"
+fi
 CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
+
+# Which chat_template_kwargs key turns reasoning off is model-specific, and an
+# unrecognised one is silently ignored — the model then reasons at full effort
+# and a 30-token budget is gone before any content token. See preflight.sh
+# ::preflight_detect_thinking_control. Falls back to today's shape if absent.
+if declare -F preflight_detect_thinking_control >/dev/null; then
+  THINK_PROBE=1   # functional check: one extra request is harmless, coverage matters
+  preflight_detect_thinking_control
+else
+  THINK_CONTROL="enable_thinking"
+  THINK_OFF_KW='{"enable_thinking": false}'
+  THINK_OFF_STD=''
+fi
+# Budget + timeout headroom when no switch was detected (see verify-full.sh).
+TOK_SCALE=1
+[[ "$THINK_CONTROL" == none* ]] && TOK_SCALE="${VERIFY_TOK_SCALE:-64}"
+MT_BASIC=$(( 30 * TOK_SCALE ))
+if (( TOK_SCALE > 1 )); then TMO_BASIC=300; else TMO_BASIC=30; fi
 
 pass() { printf "  \033[32m✓\033[0m %s\n" "$1"; }
 fail() { printf "  \033[31m✗\033[0m %s\n" "$1"; printf "    \033[33m→\033[0m %s\n" "$2"; exit 1; }
@@ -92,14 +132,14 @@ fi
 # 3. Basic completion — Paris sanity
 # --------------------------------------------------------------------
 echo "[3/4] Basic completion — capital of France ..."
-resp="$(curl -sf -m 30 "${URL}/v1/chat/completions" \
+resp="$(curl -sf -m ${TMO_BASIC} "${URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",
     \"messages\": [{\"role\": \"user\", \"content\": \"What is the capital of France? Reply in one short sentence.\"}],
-    \"max_tokens\": 30,
+    \"max_tokens\": ${MT_BASIC},
     \"temperature\": 0.6,
-    \"chat_template_kwargs\": {\"enable_thinking\": false}
+    ${THINK_OFF_STD}\"chat_template_kwargs\": ${THINK_OFF_KW}
   }")" || fail "completion request failed" "Check docker logs ${CONTAINER}"
 
 content="$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])" 2>/dev/null || true)"
@@ -141,7 +181,7 @@ tool_resp="$(curl -sf -m 60 "${URL}/v1/chat/completions" \
     \"tool_choice\": \"auto\",
     \"max_tokens\": 200,
     \"temperature\": 0.3,
-    \"chat_template_kwargs\": {\"enable_thinking\": false}
+    ${THINK_OFF_STD}\"chat_template_kwargs\": ${THINK_OFF_KW}
   }")" || fail "tool-call request failed" "Check docker logs ${CONTAINER}"
 
 tool_calls="$(echo "$tool_resp" | python3 -c "

@@ -30,11 +30,37 @@ done
 Q8=models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-q8-kxl/offload.yml
 IQ2=models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-iq2-xxs/offload.yml
 M4=models/deepseek-v4-flash-0731/llama-cpp/compose/multi4/unsloth-q8-kxl/offload.yml
+# The FORK (moe-cache) siblings. They are offload composes too, and they shipped
+# for five days with NO CPU-Offload-Host-RAM-GB header at all -- so the RAM gate
+# early-returned on the two slugs with the LARGEST host footprint in the catalog
+# (they also hold the drafter in host RAM). A 128 GB owner got a raw
+# cudaMallocHost failure instead of our refusal. Every list below includes them.
+FORK_Q8=models/deepseek-v4-flash-0731/llamacpp-club3090/compose/dual/unsloth-q8-kxl/moecache.yml
+FORK_M4=models/deepseek-v4-flash-0731/llamacpp-club3090/compose/multi4/unsloth-q8-kxl/moecache.yml
+# ── Inkling-Small: the SAME defect, on a second model (#978). Both moe-cache
+# composes carried only prose ("Needs ~120 GB of HOST RAM") and no header, so the
+# gate early-returned again -- this time a dual-5090 / 128 GB owner's container
+# was OOM-killed during load and his desktop froze. Prose is not a gate.
+INK_CACHE=models/inkling-small/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/moecache.yml
+INK_M4=models/inkling-small/llamacpp-club3090/compose/multi4/unsloth-ud-iq4xs/moecache.yml
+# ⭐ the RESIDENCY sibling shipped by #978 -- the answer for a host-RAM-bound rig,
+# and the one Inkling compose that legitimately DOES carry the bundle headers.
+# Its presence is why the no-residency-headers assertions below are per-file.
+INK_RES=models/inkling-small/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/residency.yml
+GLM_DUAL=models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/moecache.yml
+GLM_M4=models/glm-5.3-flash/llamacpp-club3090/compose/multi4/unsloth-ud-iq4xs/moecache.yml
+GLM_M8=models/glm-5.3-flash/llamacpp-club3090/compose/multi8/unsloth-ud-iq4xs/moecache.yml
+GLM3_DUAL=models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq3xxs/moecache.yml
+GLM3_M4=models/glm-5.3-flash/llamacpp-club3090/compose/multi4/unsloth-ud-iq3xxs/moecache.yml
+GLM3_M8=models/glm-5.3-flash/llamacpp-club3090/compose/multi8/unsloth-ud-iq3xxs/moecache.yml
+QWN_DUAL=models/qwen3.8-flash-next/llamacpp-club3090/compose/dual/unsloth-ud-q4kxl/moecache.yml
+QWN_M4=models/qwen3.8-flash-next/llamacpp-club3090/compose/multi4/unsloth-ud-q4kxl/moecache.yml
+QWN_M8=models/qwen3.8-flash-next/llamacpp-club3090/compose/multi8/unsloth-ud-q4kxl/moecache.yml
 NONOFF=models/tess-4-27b/llama-cpp/compose/dual/migtissera-q4km/mtp.yml
 
 # ---- detector ----
-for f in "$Q8" "$IQ2" "$M4"; do
-  is_cpu_offload_compose "$f" && ok "detects offload: $(basename "$(dirname "$f")")" \
+for f in "$Q8" "$IQ2" "$M4" "$FORK_Q8" "$FORK_M4" "$INK_CACHE" "$INK_M4" "$INK_RES"; do
+  is_cpu_offload_compose "$f" && ok "detects offload: $(basename "$(dirname "$f")")/$(basename "$f")" \
     || bad "MISSED offload compose $f"
 done
 is_cpu_offload_compose "$NONOFF" && bad "FALSE POSITIVE on a non-offload compose" \
@@ -70,9 +96,12 @@ command grep -qE "85%|305" <<<"$msg" \
   && ok "refusal cites the measurement" || bad "refusal has no evidence"
 
 # ---- RAM guard ----
-for f in "$Q8" "$IQ2" "$M4"; do
+# ⚠️ EVERY offload compose must declare the header. Without it the gate silently
+# early-returns -- the failure mode is INVISIBLE (no warning, just no refusal),
+# which is exactly how the two moe-cache slugs shipped ungated.
+for f in "$Q8" "$IQ2" "$M4" "$FORK_Q8" "$FORK_M4" "$INK_CACHE" "$INK_M4" "$INK_RES"; do
   v="$(compose_meta_get "$f" cpu-offload-host-ram-gb || true)"
-  [[ "$v" =~ ^[0-9]+$ ]] && ok "declares CPU-Offload-Host-RAM-GB=$v" \
+  [[ "$v" =~ ^[0-9]+$ ]] && ok "declares CPU-Offload-Host-RAM-GB=$v ($(basename "$(dirname "$f")")/$(basename "$f"))" \
     || bad "$f missing/invalid CPU-Offload-Host-RAM-GB"
 done
 preflight_cpu_offload_ram "$NONOFF" >/dev/null 2>&1 \
@@ -82,6 +111,20 @@ preflight_cpu_offload_ram "$NONOFF" >/dev/null 2>&1 \
 printf '# CPU-Offload-Host-RAM-GB: 999999\nservices:\n  x:\n    command: >-\n      -ot a=CPU\n' > "$tmp"
 preflight_cpu_offload_ram "$tmp" >/dev/null 2>&1 \
   && bad "impossible RAM requirement was NOT refused" || ok "impossible RAM requirement refused"
+
+# ⚠️ the refusal's "buy more cards" hint must be TRUE for the compose it prints on.
+# It only holds where residency can pin bundles back onto the GPUs — i.e. where the
+# bundle header exists. On an all-experts-on-CPU compose (the moe-cache slugs) more
+# GPUs change nothing, and telling a RAM-short user otherwise sends them shopping.
+msg="$(preflight_cpu_offload_ram "$tmp" 2>&1)"
+command grep -q "more GPUs will NOT lower" <<<"$msg" \
+  && ok "refusal without a bundle header says more GPUs will NOT help" \
+  || bad "no-residency refusal still promises more cards will help: $msg"
+printf '# CPU-Offload-Host-RAM-GB: 999999\n# CPU-Offload-Bundle-MiB: 3264\n# CPU-Offload-MoE-Layers: 43\nservices:\n  x:\n    command: >-\n      -ot a=CPU\n' > "$tmp"
+msg="$(preflight_cpu_offload_ram "$tmp" 2>&1)"
+command grep -q "needs LESS host RAM" <<<"$msg" \
+  && ok "refusal WITH a bundle header keeps the more-cards hint" \
+  || bad "residency-capable refusal lost the more-cards hint: $msg"
 
 # ---- residency-aware RAM gate (the header is the ALL-on-CPU worst case; the ----
 # ---- gate subtracts what THIS rig's VRAM will hold — clort81's #909 report) ----
@@ -242,14 +285,153 @@ m4_hdr="$(compose_meta_get "$M4" cpu-offload-host-ram-gb)"
   && ok "dual-Q8 and multi4-Q8 headers agree ($q8_hdr GB — same quant, same worst case)" \
   || bad "Q8 headers diverge (dual=$q8_hdr multi4=$m4_hdr): residency was pre-baked into one"
 
+# same again for the fork pair: same quant, same all-on-CPU `-ot`, same CPU
+# drafter, and the CUDA_Host buffer is card-count-independent.
+fq8_hdr="$(compose_meta_get "$FORK_Q8" cpu-offload-host-ram-gb)"
+fm4_hdr="$(compose_meta_get "$FORK_M4" cpu-offload-host-ram-gb)"
+[[ "$fq8_hdr" == "$fm4_hdr" ]] \
+  && ok "fork dual and fork multi4 headers agree ($fq8_hdr GB)" \
+  || bad "fork headers diverge (dual=$fq8_hdr multi4=$fm4_hdr)"
+
+# ⭐ the fork slugs must ask for MORE than the stock ones on the same weights.
+# `-devd none` puts the 10386.28 MiB DSpark model in HOST memory (the stock slug
+# keeps it in VRAM), so a header merely COPIED from the stock sibling under-gates
+# by ~10 GB. That copy is what shipped in the registry before this guard existed.
+(( fq8_hdr > q8_hdr )) \
+  && ok "fork Q8 header ($fq8_hdr) > stock Q8 header ($q8_hdr) — the CPU drafter is charged" \
+  || bad "fork Q8 header ($fq8_hdr) does not exceed stock ($q8_hdr): the -devd none drafter is not charged"
+
+# ⚠️ and they must carry NO residency headers. The fork composes' `-ot` is an
+# unconditional all-experts->CPU catch-all with no ${OT_G*} slots, so nothing is
+# ever pinned back onto the GPUs. Declaring CPU-Offload-Bundle-MiB would make the
+# gate SUBTRACT a grant that never materialises -- under-gating every rig.
+for f in "$FORK_Q8" "$FORK_M4" "$INK_CACHE" "$INK_M4"; do
+  b="$(compose_meta_get "$f" cpu-offload-bundle-mib || true)"
+  [[ -z "$b" ]] && ok "$(basename "$(dirname "$f")")/moecache.yml declares no bundle header (grant must stay 0)" \
+    || bad "$f declares CPU-Offload-Bundle-MiB=$b but has no OT_G* slots — the gate would under-gate"
+  command grep -q 'OT_G[0-9]' "$f" \
+    && bad "$f now has OT_G* slots — it needs the residency headers after all" \
+    || ok "$(basename "$(dirname "$f")")/moecache.yml has no OT_G* slots (all experts stay on CPU)"
+done
+
+# the Inkling cache pair: same weights, same all-on-CPU `-ot`, no drafter, and the
+# CUDA_Host buffer is card-count-independent -- so dual and multi4 must AGREE, and
+# the multi4 must NOT be discounted for "more cards". The cache is a COPY.
+ic_hdr="$(compose_meta_get "$INK_CACHE" cpu-offload-host-ram-gb)"
+im_hdr="$(compose_meta_get "$INK_M4" cpu-offload-host-ram-gb)"
+[[ "$ic_hdr" == "$im_hdr" ]] \
+  && ok "inkling dual and multi4 moe-cache headers agree ($ic_hdr GB)" \
+  || bad "inkling headers diverge (dual=$ic_hdr multi4=$im_hdr): a cache slug's host RAM does not fall with card count"
+
+# ---- the RESIDENCY compose is the mirror image: it MUST carry the full set ----
+# A residency compose that declares OT_G* slots but omits the bundle headers gets
+# grant 0 -- the launcher pins nothing, and the slug silently becomes an expensive
+# copy of the cache sibling. Both halves must be present or neither.
+command grep -q 'OT_G[0-9]' "$INK_RES" \
+  && ok "inkling residency.yml has OT_G* slots (the launcher can pin)" \
+  || bad "$INK_RES has no OT_G* slots — nothing will ever be pinned"
+for k in bundle-mib moe-layers first-moe-layer gpu-reserve-mib first-card-extra-mib; do
+  v="$(compose_meta_get "$INK_RES" "cpu-offload-$k" || true)"
+  [[ "$v" =~ ^[0-9]+$ ]] && ok "inkling residency.yml declares CPU-Offload-$k=$v" \
+    || bad "$INK_RES missing/invalid CPU-Offload-$k (grant would silently be 0)"
+done
+# ⚠️ the residency compose's host-RAM header must EQUAL its cache sibling's. It is
+# the ALL-on-CPU worst case for BOTH -- preflight subtracts this rig's grant itself
+# (offload_residency_grant_mib), so pre-baking expected residency here would
+# DOUBLE-COUNT it and under-gate every rig.
+ir_hdr="$(compose_meta_get "$INK_RES" cpu-offload-host-ram-gb)"
+[[ "$ir_hdr" == "$ic_hdr" ]] \
+  && ok "inkling residency header == cache header ($ir_hdr GB — worst case, grant subtracted at runtime)" \
+  || bad "inkling residency header ($ir_hdr) != cache header ($ic_hdr): residency was pre-baked into the header"
+
+# ⭐⭐ THE WINDOW MUST NOT CONTAIN AN OVERSIZED BUNDLE — the subtle one, and the
+# reason CPU-Offload-MoE-Layers is 38 on a model with 40 MoE layers.
+# _offload_layers_for_card() gives the LAST card outer-edge selection counting DOWN
+# from the top of the window, so widening the window to 40 hands that card blk.41
+# (3856 MiB) and blk.40 (3440 MiB) FIRST while the scalar gate prices both at 2848
+# -- over-pinning it by 1,600 MiB and eating the deep-prefill margin. Nothing else
+# would catch that: the compose still boots, the gate still prints a number, and
+# the card just runs closer to the edge than #931's bracket allows.
+# Cross-checked against the MEASURED per-layer table in the model profile.
+while IFS='|' read -r line; do
+  case "$line" in
+    OK\|*)   ok "${line#OK|}" ;;
+    FAIL\|*) bad "${line#FAIL|}" ;;
+  esac
+done < <(python3 - "$INK_RES" <<'PY'
+import re
+import sys
+
+compose = open(sys.argv[1], encoding="utf-8").read()
+
+def hdr(key):
+    m = re.search(rf"^#\s*{key}:\s*(\d+)\s*$", compose, re.M)
+    return int(m.group(1)) if m else None
+
+first, count, scalar = hdr("CPU-Offload-First-MoE-Layer"), hdr("CPU-Offload-MoE-Layers"), hdr("CPU-Offload-Bundle-MiB")
+prof = open("scripts/lib/profiles/models/inkling-small.yml", encoding="utf-8").read()
+m = re.search(r"^\s*per_layer_mib_default:\s*(\d+)", prof, re.M)
+default = int(m.group(1)) if m else None
+m = re.search(r"^\s*per_layer_mib_overrides:\s*\{([^}]*)\}", prof, re.M)
+overrides = {}
+if m:
+    for pair in m.group(1).split(","):
+        if ":" in pair:
+            k, v = pair.split(":")
+            overrides[int(k.strip())] = int(v.strip())
+
+if None in (first, count, scalar, default):
+    print("FAIL|could not read the residency window or the profile's per-layer table")
+    sys.exit(0)
+if scalar != default:
+    print(f"FAIL|compose bundle {scalar} MiB != profile per_layer_mib_default {default} MiB")
+else:
+    print(f"OK|compose bundle ({scalar} MiB) == profile per_layer_mib_default")
+if not overrides:
+    print("FAIL|profile declares no per_layer_mib_overrides — the outlier guard cannot run")
+    sys.exit(0)
+window = range(first, first + count)
+bad_layers = sorted(l for l in overrides if l in window)
+if bad_layers:
+    detail = ", ".join(f"blk.{l}={overrides[l]}MiB" for l in bad_layers)
+    print(f"FAIL|residency window blk.{first}-{first+count-1} contains OVERSIZED bundles ({detail}) "
+          f"but the gate prices every layer at {scalar} MiB — narrow CPU-Offload-MoE-Layers")
+else:
+    print(f"OK|residency window blk.{first}-{first+count-1} holds only uniform {scalar} MiB bundles "
+          f"(outliers {sorted(overrides)} correctly excluded)")
+PY
+)
+
 # registry host_ram_gb is the NOMINAL display figure and must never exceed the
 # header's worst case (nominal = worst case minus residency, on any topology)
+# ⚠️ every deepseek-flash slug carrying host_ram_gb MUST map to a compose here.
+# The `*-moecache` slugs used to fall through the `*)` arm and go UNCHECKED,
+# which is how they kept a copied 146 while their compose needed ~10 GB more.
 while IFS='|' read -r slug reg_gb; do
   case "$slug" in
+    *dual-q8-moecache)      f="$FORK_Q8" ;;
+    *multi4-q8-moecache)    f="$FORK_M4" ;;
+    # ⚠️ MODEL-QUALIFIED, and these MUST come BEFORE the bare *-iq4xs-moecache arms.
+    # Those are suffix-matched and silently claimed GLM's slugs the moment a second
+    # iq4xs-moecache model existed — comparing GLM's registry figure against
+    # INKLING's header (121) and failing for a reason unrelated to GLM. Any future
+    # model sharing this suffix needs its own arm here too.
+    *qwen38-flash-next-dual-q4kxl-moecache)   f="$QWN_DUAL" ;;
+    *qwen38-flash-next-multi4-q4kxl-moecache) f="$QWN_M4" ;;
+    *qwen38-flash-next-multi8-q4kxl-moecache) f="$QWN_M8" ;;
+    *glm53-flash-dual-iq3xxs-moecache)   f="$GLM3_DUAL" ;;
+    *glm53-flash-multi4-iq3xxs-moecache) f="$GLM3_M4" ;;
+    *glm53-flash-multi8-iq3xxs-moecache) f="$GLM3_M8" ;;
+    *glm53-flash-dual-iq4xs-moecache)   f="$GLM_DUAL" ;;
+    *glm53-flash-multi4-iq4xs-moecache) f="$GLM_M4" ;;
+    *glm53-flash-multi8-iq4xs-moecache) f="$GLM_M8" ;;
+    *dual-iq4xs-moecache)   f="$INK_CACHE" ;;
+    *multi4-iq4xs-moecache) f="$INK_M4" ;;
+    *dual-iq4xs-residency)  f="$INK_RES" ;;
     *dual-q8)   f="$Q8" ;;
     *dual-iq2)  f="$IQ2" ;;
     *multi4-q8) f="$M4" ;;
-    *) continue ;;
+    *) bad "$slug has host_ram_gb but no compose mapping in this test"; continue ;;
   esac
   hdr="$(compose_meta_get "$f" cpu-offload-host-ram-gb)"
   [[ "$reg_gb" =~ ^[0-9]+$ && "$reg_gb" -le "$hdr" ]] \
@@ -259,8 +441,11 @@ done < <(python3 - <<'PY'
 import sys
 sys.path.insert(0, ".")
 from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+# EVERY slug carrying host_ram_gb, not just deepseek-flash: the filter used to be
+# model-scoped, so the inkling slugs sailed past this check entirely and kept a
+# hand-typed 120 that nothing compared against the compose (#978).
 for slug, e in COMPOSE_REGISTRY.items():
-    if "deepseek-flash" in slug and e.get("host_ram_gb"):
+    if e.get("host_ram_gb"):
         print(f"{slug}|{e['host_ram_gb']}")
 PY
 )
@@ -277,10 +462,21 @@ declare -F resolve_offload_threads >/dev/null 2>&1 && ok "resolve_offload_thread
   && ok "no-op on a non-offload compose" || bad "set THREADS on a non-offload compose"
 # the bare-compose fallback must be LOW, not the reference rig's number: over-subscribing
 # measured -69% vs under-subscribing -9.6%, so err low when the core count is unknown.
-for f in "$Q8" "$IQ2" "$M4"; do
-  fb="$(command grep -oE 'THREADS:-[0-9]+' "$f" | command grep -oE '[0-9]+' | head -1)"
-  [[ -n "$fb" && "$fb" -le 8 ]] && ok "$(basename "$(dirname "$f")"): safe THREADS fallback ($fb)" \
-    || bad "$(basename "$(dirname "$f")"): THREADS fallback '$fb' is too high for an unknown rig"
+for f in "$Q8" "$IQ2" "$M4" "$FORK_Q8" "$FORK_M4" "$INK_CACHE" "$INK_M4" "$INK_RES"; do
+  # Two acceptable shapes, both safe on an unknown rig:
+  #   (a) entrypoint resolution to nproc/2  — the CURRENT convention (adapts to the host)
+  #   (b) a literal `THREADS:-N` with N <= 8 — the older bare-compose fallback
+  # A hardcoded high number (e.g. the reference rig's 28) is what this rejects:
+  # it over-subscribes a smaller box. CLI `-t` is separately forbidden because it
+  # beats the entrypoint env.
+  _lbl="$(basename "$(dirname "$f")")/$(basename "$f")"
+  if command grep -qE '_np / 2|nproc/2' "$f"; then
+    ok "$_lbl: resolves THREADS to nproc/2 in the entrypoint (portable)"
+  else
+    fb="$(command grep -oE 'THREADS:-[0-9]+' "$f" | command grep -oE '[0-9]+' | head -1)"
+    [[ -n "$fb" && "$fb" -le 8 ]] && ok "$_lbl: safe THREADS fallback ($fb)" \
+      || bad "$_lbl: THREADS fallback '$fb' is neither nproc/2 nor <=8 — unsafe on an unknown rig"
+  fi
 done
 
 # ---- wiring ----
