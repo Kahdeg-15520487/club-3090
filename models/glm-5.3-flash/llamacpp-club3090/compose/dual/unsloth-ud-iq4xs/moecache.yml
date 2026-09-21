@@ -7,7 +7,7 @@
 #   Topology:  Dual 3090 PCIe (layer-split -ts 1,1, no NVLink)
 #   Drafter:   ✅ DFlash2 Q4_K_M external (0.70 GB) — ON GPU1, depth n=3
 #              MEASURED 2026-08-29: +18.4% on CODE, −2.0% on prose.
-#              Toggle: SPEC_N=<n> depth (default 3); SPEC_N=0 disables.
+#              Toggle: SPEC_N=<n> depth (default 2); SPEC_N=0 disables.
 #              Placement: DRAFT_DEVICE (default CUDA1) — see Caveats, host is −11%.
 #   KV:        fp16 (llama.cpp default — MLA keeps it compact)
 #   Thinking:  ⛔ cannot be turned off via thinking.type (vendor: errors on this
@@ -43,6 +43,35 @@
 #   Status:    🧪 Experimental
 #   Best for:  long-context MoE serving experiments on the moe-cache engine
 #   Caveats:
+#     • ✅ TOOL CALLING WORKS — via the vendored template override wired below.
+#       ⚠️ It does NOT work on the GGUF's own embedded template: every request carrying
+#       `tools` returns HTTP 400 "Unable to generate parser for this template …
+#       CallExpression at line 163, column 57", and /props reports supports_tools:false.
+#       Reported club-3090#1250 (@paulp83); upstream ggml-org/llama.cpp#28786 (filed
+#       2026-09-11), same symptom previously unanswered on ggml-org/llama.cpp#27754.
+#       ⛔⛔ THE LINE IN THAT ERROR IS THE CRASH SITE, NOT THE CAUSE. Two earlier readings
+#       of this bug were WRONG and are recorded so nobody re-derives them:
+#         ❌ "minja cannot evaluate .items()" — GLM-4.7-Flash.jinja has the identical
+#            construct, is exercised by llama.cpp's own autoparser tests, and passes.
+#         ❌ "the caps probe under-detects supports_object_arguments because the template
+#            iterates instead of indexing" — adding a named access changes nothing; the
+#            probe never gets that far.
+#       ⭐ ACTUAL CAUSE: minja does not implement NUMERIC DOTTED ATTRIBUTE ACCESS (`x.0`).
+#       Jinja2 defines `x.0` as `x[0]`; minja parses it as a non-computed member whose
+#       property is a number literal and throws. The GGUF template uses it in 4 places, so
+#       the caps probe throws, infers NOTHING, and leaves every capability false —
+#       including supports_object_arguments, which gates the JSON-string -> object
+#       conversion of tool arguments (chat.cpp). Arguments therefore stay a string, and
+#       the autoparser then dies on `.items()` at line 163. That is why supports_string_content
+#       is false too, which no tools-only explanation accounts for.
+#       ⇒ The override is the vendor template with `.0.` -> `[0].` in 4 places plus a
+#       null-tool guard. Wire format UNCHANGED. Verified with llama.cpp's own
+#       llama-template-analysis: all four capabilities flip false -> true.
+#       ⚠️ NOT club-3090#1195 — that is an INTERMITTENT 500 parsing the model's OUTPUT
+#       ("Failed to parse tool call arguments as JSON", 2/25 turns, payload-dependent).
+#       Same subsystem, opposite end. Do not merge the two.
+#       ⚠️ NOT live-booted: verified by static analysis + the engine's own autoparser, not
+#       by serving 140 GiB end-to-end. Detail: patches/glm53-minja-numeric-index/README.md
 #     • ⚠️ ATTRIBUTION: the MoE expert cache is **leloch's** work
 #       (github.com/leloch/llama.cpp, RFC ggml-org#24528). This slug packages
 #       it; it does not originate it.
@@ -103,10 +132,17 @@
 #       ⚠️ This is the OPPOSITE of the DeepSeek sibling's `-devd none`, whose
 #       caveat (GPU drafter ⇒ zero cache hits) did NOT reproduce here: hits held
 #       at 21.7–22.1%. That caveat may be stale; re-test before copying it.
-#     • ⭐ WHY n=3 AND NOT DEEPER — n-sweep on GPU1, code decode:
-#         n=3 → 18.23 ⭐   n=5 → 16.61 (−8.9%)   n=7 → 11.10 (−27.9%)
+#     • ⭐ WHY n=2 — EXTRAPOLATED from the iq3xxs sibling, where n=2 measured
+#       ~+8-10% decode over n=3 (2026-09-04, 2 boots/arm, order reversed).
+#       NOT measured on iq4xs: same topology and mechanism, but this quant's
+#       larger experts change residency, so the optimum could differ.
+#       Superseded the original n-sweep on GPU1, code decode, kept for the
+#       shape of the deeper tail:
+#         n=3 → 18.23     n=5 → 16.61 (−8.9%)   n=7 → 11.10 (−27.9%)
 #       Mean accepted length is INVARIANT at ~3 regardless of the cap; raising
-#       n_max only inflates drafts the CPU-resident target must still verify.
+#       n_max only inflates drafts the CPU-resident target must still verify —
+#       and mean accepted length is what made n=3 look right, because it does
+#       not price the REJECTED tail the CPU-resident experts must verify.
 #       ⚠️ Acceptance RATE falls 53%→33% from n=3→n=7 as a DENOMINATOR effect —
 #       do not read that as worse drafting, and do not tune on it.
 #       ⚠️ SHALLOWER than the DeepSeek sibling's SPEC_N=5. Do not share defaults.
@@ -167,6 +203,9 @@ services:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8119}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+      # minja-compatible chat template — WITHOUT this every tools request 400s and
+      # /props reports supports_tools:false. See patches/glm53-minja-numeric-index/README.md
+      - ../../../patches/glm53-minja-numeric-index/chat_template.jinja:/etc/glm53-chat-template.jinja:ro
     environment:
       # Drafter toggle - docker forwards only what is declared here.
       - SPEC_N=${SPEC_N:-}
@@ -301,8 +340,8 @@ services:
             echo "[spec]   $$_draft" >&2
             echo "[spec] This slug REQUIRES it (block-45 MTP is unwired => no other spec path)." >&2
             echo "[spec] Fix one of:" >&2
-            echo "[spec]   - download it: /opt/ai/hf-download.sh Anbeeld/GLM-5.3-Flash-DFlash2-GGUF \\" >&2
-            echo "[spec]       <MODEL_DIR>/glm-5.3-flash-gguf/dflash2 GLM-5.3-Flash-DFlash2-Q4_K_M.gguf" >&2
+            echo "[spec]   - fetch it with setup (knows this drafter is required):" >&2
+            echo "[spec]       WEIGHTS=iq4xs bash scripts/setup.sh glm-5.3-flash" >&2
             echo "[spec]   - or run drafter-off knowingly: SPEC_N=0" >&2
             exit 1
           fi
@@ -377,6 +416,21 @@ services:
       # normal case here (REASONING_EFFORT=max => long thinking traces); the
       # multi* siblings keep 4096 because long-context prefill dominates there.
       # For bulk long-document prefill on this compose, override UBATCH=4096.
+      # ⚠️⚠️ -ub 2048 CAN CRASH ON LONG PREFILL — KNOWN UPSTREAM, NOT FIXED.
+      # ggml-org/llama.cpp#28282: CUDA "illegal memory access" during prefill on
+      # GLM-5.3-Flash (glm5next) at -ub 2048, around the 2nd-3rd context
+      # checkpoint on a 7k+ prompt. THREE independent reports: sm_120 Blackwell
+      # (upstream), and two dual-3090s (club-3090#1238 + @Pix13 upstream), so it
+      # is NOT arch-specific. Independent of the DFlash2 drafter and of
+      # --cache-reuse.
+      #   WORKAROUND: UBATCH=512 (or 128). Confirmed full fix by two reporters.
+      # ⭐ 2048 IS KEPT AS THE DEFAULT DELIBERATELY (maintainer call 2026-09-11):
+      # it is worth ~+24% decode on the i-quant arm (BENCHMARKS row 8 vs 9,
+      # 14.58 -> 18.12 narrative), and the crash needs a long prompt to trigger.
+      # Short- and mid-context work is unaffected. Set UBATCH=512 if you do bulk
+      # long-document prefill, until #28282 lands.
+      # ⚠️ Whether K-quant experts dodge this is UNTESTED — all three reports so
+      # far are i-quant. If you hit it on a DevQuasar arm, say so on #28282.
       - '-ub'
       - '${UBATCH:-2048}'
       - '-b'
@@ -396,7 +450,7 @@ services:
       - '--spec-type'
       - 'draft-dflash'
       - '--spec-draft-n-max'
-      - '${SPEC_N:-3}'
+      - '${SPEC_N:-2}'
       # Drafter device. Default CUDA1 (GPU1) — MEASURED best 2026-08-29: on GPU
       # +18.4% code vs host, and placement was worth 21 points between arms.
       # ⚠️ Takes a device NAME, not an index: `CUDA1` is valid, `1` is NOT.
@@ -509,6 +563,14 @@ services:
       - '--reasoning-effort'
       - '${REASONING_EFFORT:-max}'
       # Route thoughts to message.reasoning_content (never inline in content).
+      # ⭐ minja cannot parse `x.0` (numeric dotted attribute access); the GGUF's own
+      # template uses it in 4 places, which makes the jinja caps probe throw and report
+      # EVERY capability false — so tool arguments are never converted from JSON string
+      # to object and the autoparser dies. This override is the vendor template with
+      # `.0.` -> `[0].` (semantics-identical in Jinja2) + a null-tool guard. Wire format
+      # unchanged. club-3090#1250.
+      - '--chat-template-file'
+      - '/etc/glm53-chat-template.jinja'
       - '--reasoning-format'
       - '${REASONING_FORMAT:-deepseek}'
       # ✅ What DOES work is not paying for it twice. This GGUF's template sets

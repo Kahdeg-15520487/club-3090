@@ -11,6 +11,37 @@ schema_version: 1
 # all new tooling MUST read `delivery_mechanism`/`delivery_spec` instead. Do
 # not add new compose wiring decisions to the boolean block.
 patches:
+  - id: fa2-fp8kv-sm86
+    model: [qwen3.8-27b]
+    files:
+      - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/install.sh
+      - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/install_artifact.py
+      - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_context.py
+      - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_vision_context.py
+    load_bearing_when:
+      - composes: [vllm/qwen38-27b-dual-ultramax]
+        reason: "Stock FA2 cannot consume FP8 KV on SM86. This sidecar uses pinned FA2 E4M3 kernels for target/draft attention and bounded native FA2 prefill."
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: install_script
+    delivery_spec:
+      script: models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/install.sh
+      mounted_at: /etc/club3090/fa2
+      invoke: bash /etc/club3090/fa2/install.sh
+      invoked_before: vllm-serve
+    drift_guard:
+      kind: boot
+      check: "Installer verifies artifact identity, payload checksums, CUDA/PyTorch/Python ABI, and the FlashAttention metadata/layout interface before installing the prebuilt plugin. No vLLM source files are changed."
+    capability: fa2-fp8kv-sm86
+    foundational: false
+    upstream:
+      ref: AntonProkopyev/fa2-fp8kv-sm86@0fa02cbb760fbcc4a94ba1ee376e89825f8f43f4
+      status: experimental
+      drop_when: "Stock vLLM provides a validated SM86 FA2 FP8 KV path."
+    status: verified
   - id: qwen-sglang-autoround-fused-bf16
     deprecated_on: "2026-06-05"
     deprecation_reason: "SGLang path parked; no functional compose uses it (#254)."
@@ -339,6 +370,56 @@ patches:
       drop_when: "upstream Qwen accepts `high` as a valid rung at all (costs them nothing), OR vLLM's Anthropic router stops forwarding a `high` it cannot know is unsupported. Re-vendor from the model dir if Qwen ships a corrected template and re-run the drift guard."
     status: verified
 
+  - id: vllm-51581-dflash-dense-kv
+    # Successor to `vllm-dflash2-backport`, which bundled TWO upstream fixes.
+    # vllm#52816 (the DFlash2 model classes) is native since v0.29.0; vllm#51581
+    # (this) is still OPEN. Splitting them is what makes the v0.29.0 pin bump
+    # possible: the old bundle cannot be re-applied on v0.29.0 (its
+    # _check_applied.py does not recognise upstream's refactor, so install.sh
+    # attempts the apply, conflicts, and exits 1 -> boot REFUSED on all 12
+    # dflash2 composes).
+    model: [qwen3.8-27b]
+    files:
+      - models/qwen3.8-27b/vllm/patches/vllm-51581-dflash-dense-kv/install.sh
+      - models/qwen3.8-27b/vllm/patches/vllm-51581-dflash-dense-kv/patch_dflash_dense_kv.py
+    load_bearing_when:
+      - composes:
+          - vllm/qwen38-27b-dual-superfast
+          - vllm/qwen38-27b-dual-ultrafast
+          - vllm/qwen38-27b-dual-supermax
+          - vllm/qwen38-27b-dual-ultramax
+          - vllm/qwen38-27b-multi4-superfast
+          - vllm/qwen38-27b-multi4-ultrafast
+          - vllm/qwen38-27b-multi4-supermax
+          - vllm/qwen38-27b-multi4-ultramax
+          - vllm/qwen38-27b-multi8-superfast
+          - vllm/qwen38-27b-multi8-ultrafast
+          - vllm/qwen38-27b-multi8-supermax
+          - vllm/qwen38-27b-multi8-ultramax
+        reason: "vllm#51581 (OPEN 2026-08-09): DFlashQwen3Model._build_context_kv_buffers builds its fused KV buffer with `kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]`, and qwen3_dflash.py has ZERO quantization awareness (no qweight / weight_packed / quant_method / scheme references anywhere in the file). On the shipped W4A16 drafter that means either a hard `AttributeError: 'QKVParallelLinear' object has no attribute 'weight'` at EngineCore init (reproduced on v0.29.0, 2026-09-12) or -- per the upstream title -- SILENT CORRUPTION where .weight exists but holds packed uint8/float8 rows that get sliced and fed to F.linear without error. This patch restores _dense_kv_rows(), which unpacks weight_packed/weight_scale and dequantizes before the slice; an already-dense 2-D .weight short-circuits so unquantized drafters take the stock path. Without it EVERY vLLM DFlash2 tier is either dead or suspect on v0.29.0."
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: install_script
+    delivery_spec:
+      script: models/qwen3.8-27b/vllm/patches/vllm-51581-dflash-dense-kv/install.sh
+      mounted_at: /etc/club3090/dflash-dense-kv
+      invoke: bash /etc/club3090/dflash-dense-kv/install.sh
+      invoked_before: vllm-serve
+    drift_guard:
+      kind: boot
+      check: "Entrypoint runs install.sh before serve; boot log '[51581] applied: DFlash fused-KV slice now dequantizes qkv_proj' (first boot) or '[51581] already patched (idempotent no-op)'. Anchor drift -> REFUSE (exit 1), deliberately fail-closed: an unpatched fused-KV path on a quantized drafter can corrupt silently rather than crash, so a silent half-wire is the one outcome we must not allow. Anchors verified inside the real vllm/vllm-openai:v0.29.0 image 2026-09-12 (apply + idempotent re-run + ast.parse)."
+    capability: dflash2-quantized-drafter
+    foundational: false
+    upstream:
+      ref: "vllm-project/vllm#51581"
+      status: "open"
+      filed_by: "third-party (not us) - 11 comments as of 2026-09-12"
+      also_implemented_by: "gratex/Qwen3.8-27B-DFlash2-W4A16-g128-sym-GPTQ ships scripts/apply_dense_kv_fix.py with a BROADER _dense_kv_rows covering FP8 (per-tensor/channel/shard/block), GPTQ/AWQ, NVFP4 and MXFP4; ours covers compressed-tensors W4A16/W8A16 only. Borrow from it if an fp8 drafter is ever adopted. It also confirms GGUF/bitsandbytes/MLX drafters are unsupported on this path."
+      drop_when: "vLLM merges a #51581 fix AND the vllm-stable pin moves past it -> remove the 12 dflash2 compose mounts + entrypoint calls and retire this row. Verify by booting a dflash2 slug on the new pin with the mount REMOVED and reading accept-len (a corrupt fused-KV path presents as a merely slow drafter, so boot-success alone is NOT sufficient evidence)."
+    status: verified
   - id: vllm-pr48375-mamba-drop-eagle-block
     # qwen3.8-27b added 2026-08-14: its two vLLM "max" composes ship the SAME
     # MTP + prefix-caching pair on the same Qwen3-Next hybrid family, and mount
@@ -356,6 +437,7 @@ patches:
           - vllm/qwen-27b-multi-fast
           - vllm/qwen-27b-multi-max
           - vllm/tess-dual-w4a16
+          - vllm/qwen38-27b-dual-ultramax
           - vllm/qwen38-27b-dual-max
           - vllm/qwen38-27b-multi4-max
         reason: "Vendored upstream fix vllm#48375 for vllm#43559 (MTP x prefix-caching corrupts recurrent-state KV on Qwen3-Next hybrids; ~20% acc drop reproduced upstream on 35B-A3B): MambaManager.find_longest_cache_hit receives drop_eagle_block but silently ignores it, so the final matched page's Mamba/GDN state snapshot may reflect draft tokens verification later rejected. The 9-line fix lowers the hit-search ceiling by one page. ACTIVE by default since 2026-07-17: the same PR flipped the pair-capable composes back to --enable-prefix-caching (the #720 off-default cost 7.4x TTFT on long prefixes per kevinb361's production data, and the pair-clean evidence stack is now: upstream repro+fix+tests, kevin's 7-day production at 89.5% hit rate on v0.25.x, our 6-arm probe matrix). Opt-out: PREFIX_CACHE_ARG=--no-enable-prefix-caching makes the patched path dormant again. On-rig validation 2026-07-17: no-harm on both hybrid families (27B + 35B-A3B, MTP n=3 + prefix-ON: 12/12 post-agent tool-call probes clean per arm with prefix_cache_hits_total asserted; accept-len 3.2-3.9 intact; ~5% fewer hit tokens = the by-design one-block reduction). Full 6-arm matrix: club-3090#710."
@@ -395,16 +477,10 @@ patches:
     model: [qwen3.8-27b]
     files:
       - models/qwen3.8-27b/vllm/patches/vllm-dflash2-backport
-    load_bearing_when:
-      - composes:
-          - vllm/qwen38-27b-dual-ultrafast
-          - vllm/qwen38-27b-multi4-ultrafast
-          - vllm/qwen38-27b-multi8-ultrafast
-        reason: "Without the backport, vLLM v0.27.1 cannot resolve the DFlash2DraftModel architecture in the drafter checkpoint (syvai/Qwen3.8-27B-DFlash2-W4A16), so --speculative-config method=dflash fails to load and the ULTRAFAST tier cannot boot. The backport adds qwen3_dflash2.py + the v1 DFlash2 speculator (grouped dynamic depthwise conv + candidate selector) and routes to the V2 Model Runner. An external block-drafter, so it entirely sidesteps the built-in-MTP acceptance collapse (club-3090#1052 / vllm#52873). On-rig validation 2026-08-20 (reference 2x3090, v0.27.1, Frozenlock target): boot resolves 'DFlash2DraftModel' + 'Model Runner V2' + 'Capturing model for DFlash2 speculator'; verify-full 9/9 (accept-len 3.74); bench 132 narr / 227 code TPS; collapse soak clean to 21k gen with 0 crashes."
-        evidence: "models/qwen3.8-27b/vllm/patches/vllm-dflash2-backport/README.md; vllm#52816; learnings/qwen3.8-27b.md"
+    load_bearing_when: []   # de-wired 2026-09-12; native since v0.29.0
     delivery:
       dockerfile_bake: false
-      entrypoint_invoke: true
+      entrypoint_invoke: false
       genesis: false
     delivery_gaps: []
     delivery_mechanism: install_script
@@ -421,9 +497,29 @@ patches:
       on_fail: boot-refused
     upstream:
       ref: "vllm-project/vllm#52816"
-      status: "open"
+      status: "merged"
+      merged_at: "2026-08-21"
+      shipped_in_release: "v0.28.0"
+      native_since_pin: "vllm-stable@v0.29.0"
       drop_when: "vLLM merges #52816 (DFlash2DraftModel + candidate selector) AND the vllm-stable pin moves past it -> remove the 3 dflash2 compose mounts + entrypoint calls + retire this row and the patch dir."
-    status: verified
+    deprecated_on: 2026-09-12
+    deprecation_reason: >-
+      DROPPED at the v0.29.0 pin bump — its own drop_when is satisfied. vLLM merged
+      #52816 on 2026-08-21 and v0.29.0 ships DFlash2 natively:
+      model_executor/models/qwen3_dflash2.py (DFlash2Qwen3ForCausalLM / Model /
+      DecoderLayer, CandidateSelector, DFlashGroupedConv) plus
+      v1/worker/gpu/spec_decode/dflash2/speculator.py (DFlash2Speculator) — the same
+      v1/worker/gpu tree this backport retrofitted. All 12 compose mounts and their
+      entrypoint install calls are removed; the patch directory is retained as
+      history. Do NOT re-wire it on v0.29.0+: install.sh applies unconditionally when
+      _check_applied.py does not recognise the tree, and a conflicting apply exits 1,
+      which REFUSES the boot (verified in the real v0.29.0 image 2026-09-12).
+      ⚠️ SUPERSEDED, NOT SIMPLY DROPPED: this backport bundled TWO fixes. #52816 is now
+      native, but vllm#51581 (fused-KV slice has no quantization awareness) is STILL
+      OPEN, and dropping the bundle wholesale killed every W4A16-drafter tier on
+      v0.29.0 with an AttributeError. The #51581 half lives on as
+      `vllm-51581-dflash-dense-kv`, which is what the 12 dflash2 composes now mount.
+    status: suspect
   - id: vllm-flashinfer-decode-pin
     # qwen3.8-27b (2026-08-18): the dual-fast slug (W4A8 + MTP n=4 + fp8 KV +
     # prefix caching, the hybrid GDN family) crashed the engine in ~15s at
@@ -479,6 +575,7 @@ patches:
       - models/qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order/patch_gdn_mtp_async_spec_order.py
     load_bearing_when:
       - composes:
+          - vllm/qwen38-27b-dual-ultramax
           - vllm/qwen38-27b-dual-fast
           - vllm/qwen38-27b-multi4-fast
           - vllm/qwen38-27b-multi8-fast
@@ -1085,3 +1182,131 @@ patches:
   - <<: *genesis_env_patch
     id: genesis-pn59-streaming-gdn
     genesis_env: GENESIS_ENABLE_PN59_STREAMING_GDN
+  - id: glm53-minja-numeric-index
+    model: [glm-5.3-flash]
+    status: unverified
+    files:
+      - models/glm-5.3-flash/llamacpp-club3090/patches/glm53-minja-numeric-index
+    load_bearing_when:
+      - composes: null
+        reason: >-
+          Without it EVERY request carrying `tools` returns HTTP 400 ("Unable to generate
+          parser for this template") and /props reports supports_tools:false — so the tool
+          path is dead on all 18 GLM composes, which is why this is load-bearing for tool
+          traffic on every one of them rather than an optimisation. minja does not implement
+          numeric dotted attribute access (`x.0`); Jinja2 defines it as `x[0]`. The GGUF's
+          embedded template uses it in 4 places, so the jinja caps probe throws, infers
+          NOTHING, and leaves every capability false — including supports_object_arguments,
+          which gates the JSON-string -> object conversion of tool arguments in chat.cpp.
+          Arguments then stay a string and the autoparser dies on `.items()`. The `.items()`
+          line named in the error is the CRASH SITE, not the cause — GLM-4.7-Flash.jinja
+          carries the identical construct and passes upstream. Override = vendor template
+          with `.0.` -> `[0].` in 4 places + a null-tool guard; wire format unchanged.
+        evidence: >-
+          models/glm-5.3-flash/llamacpp-club3090/patches/glm53-minja-numeric-index/README.md;
+          club-3090#1250 (@paulp83); ggml-org/llama.cpp#27754 (same symptom reported upstream
+          2026-09-07, unanswered); verified with llama.cpp's own llama-template-analysis —
+          all four capabilities flip false -> true
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: false
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: chat_template
+    delivery_spec:
+      jinja: models/glm-5.3-flash/llamacpp-club3090/patches/glm53-minja-numeric-index/chat_template.jinja
+      mounted_at: /etc/glm53-chat-template.jinja
+      mount_mode: ro
+      invoke: --chat-template-file /etc/glm53-chat-template.jinja
+      wired_at: [volumes, command]
+      note: >-
+        The vendor template (zai-org/GLM-5.3-Flash, as embedded in the GGUFs) with `.0.` ->
+        `[0].` in 4 places plus a null-tool guard on the tools loop. Semantics-identical under
+        Jinja2, which defines `x.0` as `x[0]`; the WIRE FORMAT is untouched. Mounted read-only
+        and selected with --chat-template-file; `use_jinja` defaults to true in this engine
+        build so no --jinja flag is required.
+    drift_guard:
+      kind: behavioral
+      check: >-
+        The override must contain NO `.0.` numeric dotted access — re-vendoring a fresh vendor
+        template without re-applying the fix silently returns every jinja capability to false
+        and makes tool calls 400, while boot and /health stay green. Assert positively rather
+        than by absence: llama-template-analysis --template-file <this> must report
+        supports_tools / supports_tool_calls / supports_parallel_tool_calls /
+        supports_string_content ALL true, and GET /props on a booted server must agree. Then a
+        tool-call smoke (auto tool choice, one get_weather-class call) must return
+        finish_reason=tool_calls with valid JSON arguments, and a 3-turn tool loop must replay
+        without 400s. Any behavioral/TPS comparison the guard performs MUST use the
+        SELF-CONTAINED symmetric restart+settle protocol: identical docker restart on BOTH
+        arms -> healthy -> fixed 60s settle -> >=3 bench.sh runs/arm -> compare the grand mean,
+        never a single run (boot-to-boot noise on this rig is ~2.8%, run-to-run ~0.2%).
+      on_fail: tool-calls-silently-dead
+    capability: glm53-tool-calling
+    upstream:
+      ref: https://github.com/ggml-org/llama.cpp/issues/28786
+      status: reported
+      drop_when: >-
+        minja implements `x.0` as `x[0]`, or the caps probe degrades gracefully instead of
+        inferring nothing when a probe throws. Closest prior art: ggml-org/llama.cpp#28509
+        (Gemma 4 misclassified supports_typed_content), same subsystem, closed completed.
+  - id: qwen38-sglang-autoround-w4a8-v0519
+    model: [qwen3.8-27b]
+    status: unverified
+    files:
+      - models/qwen3.8-27b/sglang/patches/sglang-autoround-w4a8-v0.5.19
+    load_bearing_when:
+      - composes:
+          - sgl/qwen38-27b-dual-fast
+          - sgl/qwen38-27b-dual-superfast
+          - sgl/qwen38-27b-dual-max
+          - sgl/qwen38-27b-multi4-fast
+          - sgl/qwen38-27b-multi4-superfast
+          - sgl/qwen38-27b-multi4-max
+          - sgl/qwen38-27b-multi4-supermax
+          - sgl/qwen38-27b-multi8-fast
+          - sgl/qwen38-27b-multi8-superfast
+          - sgl/qwen38-27b-multi8-max
+          - sgl/qwen38-27b-multi8-supermax
+        reason: >-
+          Enables the serve-time W4A8 toggle (W4A8=1 -> int8 activations on the int4 weights) on every
+          registry-wired sgl/ slug. Unlike vLLM, SGLang has NO env-gated W4A8 path, so here APPLYING THE
+          PATCH IS THE ACTIVATION: each compose mounts this dir at /etc/club3090/w4a8 and the entrypoint
+          runs install.sh + install.sh --verify before launch. The patch is a re-cut of @jb-seo's
+          0004-autoround-w4a8.patch (cut against v0.5.19's predecessor v0.5.18) onto v0.5.19 by @A1RM4X
+          (club-3090#1226); its substantive addition is the per-shard K%128==0 / N%64==0 shape guard that
+          jb-seo's eligibility gate omitted -- without it Qwen3.8-27B's merged GDN in_proj_ba (N=96 ->
+          48/rank at TP=4) crashes in gptq_marlin_repack with 'size_n=48 is not divisible by 64'; the
+          guard routes non-conformant shards to standard Marlin W4A16 instead. DORMANT AT THE DEFAULT:
+          W4A8=0 ships, the installer is never invoked, and the composes serve stock W4A16 -- so this is
+          load-bearing only for the W4A8=1 path, and the toggle hard-fails rather than silently serving
+          W4A16 if the mount does not resolve. Measured on the reference 2x3090 PCIe rig: dual-fast
+          prefill@10K 1183 -> 1710 (+44.5%, n=3 CV 0.8%) and @90K 953 -> 1276 (+33.9%) for -11.1% code
+          decode; dual-superfast prefill@10K 1234 -> 1779 (+44.1%, n=3 CV 0.4%) and @90K 973 -> 1345
+          (+38.3%), decode ~flat, MTP accept unchanged 3.71 -> 3.72. A trade, not a free win. NOT load-
+          bearing for the two unregistered composes (dual/autoround-int4/dflash2-bf16.yml,
+          dual/fp8/dflash2.yml), which carry the same toggle but have no slug.
+        evidence: >-
+          models/qwen3.8-27b/sglang/patches/sglang-autoround-w4a8-v0.5.19/README.md; club-3090#1226
+          (@A1RM4X's re-cut + shape guard, cherry-picked with authorship preserved); BENCHMARKS.md 'Quad-
+          card (4x RTX 3090, TP=4) - SGLang' row (@A1RM4X's own 4-card numbers)
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: install_script
+    delivery_spec:
+      script: models/qwen3.8-27b/sglang/patches/sglang-autoround-w4a8-v0.5.19/install.sh
+      mounted_at: /etc/club3090/w4a8
+      invoke: "bash /etc/club3090/w4a8/install.sh"
+      invoked_before: sglang-launch
+      wired_at: [volumes, entrypoint]
+    drift_guard:
+      kind: marker
+      check: "install.sh hard-fails (exit 1) if any of the 3 content markers is missing after apply, or if a partial 1-2/3 state is detected — a re-pinned image that drops a W4A8 hook serves nothing, not a half-wired mix"
+      on_fail: refuse-to-boot
+    capability: sglang-w4a8-dense-gemm
+    upstream:
+      ref: jb-seo/club-3090 (0004-autoround-w4a8.patch, cut against SGLang v0.5.18)
+      status: ours
+      drop_when: "SGLang lands AutoRound W4A8 with the K%128/N%64 shape guard natively in the AutoRoundConfig eligibility gate — then this re-cut + guard is retired (keep the compose, drop the mount)."

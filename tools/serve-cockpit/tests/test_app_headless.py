@@ -176,7 +176,7 @@ def ok(stdout: str) -> RunResult:
 
 
 def make_detect(target: ServingTarget):
-    async def _detect() -> ServingTarget:
+    async def _detect(**_kwargs) -> ServingTarget:
         return target
     return _detect
 
@@ -1842,6 +1842,33 @@ class TestCatalogWired:
         assert _spec_token("") == ""
         assert _spec_token("some-future-ngram-drafter") == "ngram"
 
+    def test_spec_token_drafterless_matches_drafter_vocabulary(self):
+        """A built-in speculation head needs NO external drafter artifact, so its
+        slug keeps ``drafter: null`` and the method arrives on ``spec_method``.
+        That branch must render the SAME token the drafter branch would, or the
+        column spells one method two ways depending on which field carries it.
+
+        Regression (2026-09-18): the branch returned the raw registry token
+        (``sm.split("-")[0]``), so ``drafter=null`` + ``spec_method="mtp"``
+        printed lowercase "mtp" on three rows — bucko-vllm/qwen3.8-flash-next-ple
+        and both exllamav3/…-cpumoe slugs — against ~130 core rows printing "MTP".
+        """
+        from club3090_cockpit.app import _spec_token
+
+        for spec_method, want in {
+            "mtp": "MTP",
+            "mtp_assistant": "MTP·asst",
+            "ngram-mod": "ngram",
+            "dflash": "DFlash",
+            "dflash2": "DFlash2",
+            "dspark": "DSpark",
+        }.items():
+            assert _spec_token("", spec_method) == want, spec_method
+        # Drafter still wins when both are set, and an unknown method degrades
+        # to its leading token rather than inventing a label.
+        assert _spec_token("anbeeld-qwen-dflash", "mtp") == "DFlash"
+        assert _spec_token("", "") == ""
+
     def test_byo_result_route_c_reframes_as_servable(self):
         """A Route-C swap (curated-arch fine-tune) reframes the engine's
         'no-fit-model' verdict into a positive, actionable card — regression guard
@@ -3043,6 +3070,129 @@ async def test_scene_preview_shows_all_services_no_clip():
         assert "max-height" not in preview_rule
 
 
+class TestGpuCardsScaleToCardCount:
+    """The GPU panel renders ONE card per detected GPU, at any count.
+
+    Reported from the field 2026-09-08: "c3 cockpit only detects 2 GPU of 4 while
+    nvtop detects everyone".  Detection was never the problem — get_gpu_info()
+    parses every nvidia-smi line — but compose() defined exactly two card widgets
+    and _populate_gpus iterated a hardcoded (0, 1) pair, so cards 2+ were read and
+    dropped at render time.
+
+    This rig has TWO GPUs, so every count here is otherwise unreachable and would
+    ship on assumption.  That is the point of these fixtures.
+    """
+
+    @staticmethod
+    def _cards(n):
+        return [
+            GpuInfo(index=i, mem_used_mib=(i + 1) * 1024, mem_total_mib=24 * 1024,
+                    utilization=10 * i)
+            for i in range(n)
+        ]
+
+    async def _settled(self, app, pilot):
+        """Enter Operate and run a SECOND poll, so cards mounted on the first pass
+        (mount is async — they carry the startup placeholder until the DOM catches
+        up) are filled before anything is asserted."""
+        await _enter_operate(pilot)
+        app._periodic_estate_refresh()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    @pytest.mark.asyncio
+    async def test_four_gpu_rig_renders_four_cards(self):
+        gpus = self._cards(4)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 60)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 4
+            for i in range(4):
+                bar = str(app.query_one(f"#gpu{i}-bar", Static).render())
+                assert f"{(i + 1)}.0 / 24.0 GiB" in bar, f"card {i}: {bar!r}"
+
+    @pytest.mark.asyncio
+    async def test_eight_gpu_rig_renders_eight_cards(self):
+        gpus = self._cards(8)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 80)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 8
+            bar7 = str(app.query_one("#gpu7-bar", Static).render())
+            assert "8.0 / 24.0 GiB" in bar7
+
+    @pytest.mark.asyncio
+    async def test_single_gpu_rig_drops_the_second_static_card(self):
+        """compose() lays down two cards; a 1-card rig must converge DOWN, not keep
+        an empty "not present" slot forever."""
+        gpus = self._cards(1)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 1
+            assert not app.query("#gpu1-card")
+
+    @pytest.mark.asyncio
+    async def test_card_count_change_between_polls_converges_both_ways(self):
+        """A card appearing or falling off the bus mid-session must not leave stale
+        widgets behind in either direction."""
+        gpus = self._cards(2)
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 80)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 2
+            pane = app.query_one("#operate-orch-pane", OperateOrchPane)
+            st = pane._last_state
+            # 2 -> 4
+            st.gpus = self._cards(4)
+            pane._populate_gpus(st)
+            await pilot.pause()
+            pane._populate_gpus(st)
+            await pilot.pause()
+            assert len(app.query(".gpu-card")) == 4
+            # 4 -> 2 (two cards vanish)
+            st.gpus = self._cards(2)
+            pane._populate_gpus(st)
+            await pilot.pause()
+            assert len(app.query(".gpu-card")) == 2
+            assert not app.query("#gpu3-card")
+
+    @pytest.mark.asyncio
+    async def test_index_gap_keeps_real_gpu_numbers(self):
+        """Cards 0 and 2 present, 1 missing: slot 2 must still BE GPU2 (a
+        len()-driven count would slide it down to slot 1 and mislabel it), and the
+        gap keeps the calm "not present" — not the alarming empty-read message."""
+        gpus = [
+            GpuInfo(index=0, mem_used_mib=1024, mem_total_mib=24 * 1024),
+            GpuInfo(index=2, mem_used_mib=3 * 1024, mem_total_mib=24 * 1024),
+        ]
+        app, _, _ = make_app(gpus=gpus, target=ServingTarget(gpus=gpus))
+        async with app.run_test(size=(120, 60)) as pilot:
+            await self._settled(app, pilot)
+            assert len(app.query(".gpu-card")) == 3
+            assert "3.0 / 24.0 GiB" in str(app.query_one("#gpu2-bar", Static).render())
+            gap = str(app.query_one("#gpu1-bar", Static).render())
+            assert "not present" in gap
+            assert "nvidia-smi returned nothing" not in gap
+
+    @pytest.mark.asyncio
+    async def test_empty_read_keeps_one_card_and_the_honest_message(self):
+        """N2 degradation is unchanged: an empty read is nvidia-smi failing, not a
+        GPU-less rig, and it still says so on card 0."""
+        app, _, _ = make_app(gpus=[], target=ServingTarget(gpus=[]))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            pane = app.query_one("#operate-orch-pane", OperateOrchPane)
+            st = pane._last_state
+            if st is not None:
+                st.gpus = []
+                pane._populate_gpus(st)
+                await pilot.pause()
+                assert len(app.query(".gpu-card")) == 1
+                bar0 = str(app.query_one("#gpu0-bar", Static).render())
+                assert "nvidia-smi returned nothing" in bar0
+
+
 class TestRailKvPool:
     """c3 — the estate rail card shows the serving target's KV pool from the
     SAME poll (doctor.kv_pool_pct, parsed by health.sh), honestly '—' when the
@@ -3108,7 +3258,8 @@ class TestEstateVramSplit:
              "compute": 5240, "pool": 9903, "used": 22992, "total": 24576,
              "unaccounted": 2563},
         ],
-        "warnings": ["2 moe-cache allocations logged per pool"],
+        "warnings": ["2 moe-cache allocations logged per pool -- figures "
+                     "take the LAST (summing them double-counts)"],
     }
 
     @staticmethod
@@ -3139,6 +3290,10 @@ class TestEstateVramSplit:
             assert "cycle" in txt                    # [G] affordance
             # model aggregates: 3524 + 3969 MiB ≈ 7 GiB
             assert "7G" in txt
+            # used/total anchor line: 22938+22992 of 2×24576 MiB
+            assert "used" in txt and "48G" in txt and "(93%)" in txt
+            # full moe-cache warning, not the 60-char chop
+            assert "summing them double-counts" in txt
 
     @pytest.mark.asyncio
     async def test_rail_drills_down_to_one_gpu(self):
@@ -3201,18 +3356,45 @@ class TestEstateVramSplit:
 
     @pytest.mark.asyncio
     async def test_worker_populates_split_and_G_cycles(self):
-        payload = json.dumps({
-            "devices": self.PAYLOAD["devices"],
-            "warnings": self.PAYLOAD["warnings"],
-        })
-        glm_log = (
-            "0.12.593.897 I load_tensors:        CUDA0 model buffer size =  3524.46 MiB\n"
-            "1.03.561.019 I llama_kv_cache:      CUDA1 KV buffer size =    80.00 MiB\n")
-        runner = FakeRunner(responses={
-            "docker logs": RunResult(returncode=0, stdout=glm_log, stderr=""),
-            "vram_breakdown.py": RunResult(returncode=0, stdout=payload,
-                                           stderr=""),
-        })
+        # Regression (#1118 follow-up): the boot component lines live on
+        # STDERR of a long log whose head any --tail window drops.  The read
+        # must take the FULL log and merge BOTH streams.
+
+        class _StreamsRunner(FakeRunner):
+            """docker-logs served with BOTH streams; for the parser call,
+            reads the handed temp log so the test can see what it got."""
+
+            def __init__(self, stdout, stderr):
+                super().__init__({})
+                self._out, self._err = stdout, stderr
+                self.parser_saw_load_tensors = False
+
+            async def run(self, cmd, *, cwd, timeout=30.0):
+                self.calls.append(list(cmd))
+                joined = " ".join(cmd)
+                if "vram_breakdown.py" in joined:
+                    log_file = cmd[cmd.index("--json") - 1]
+                    content = Path(log_file).read_text()
+                    self.parser_saw_load_tensors = "load_tensors" in content
+                    payload = json.dumps({
+                        "devices": (
+                            [{"device": "CUDA0", "model": 3524, "kv": 1238,
+                              "state": 231, "compute": 5329, "pool": 11714,
+                              "used": 22938, "total": 24576,
+                              "unaccounted": 902}]
+                            if self.parser_saw_load_tensors else []),
+                        "warnings": [],
+                    })
+                    return RunResult(returncode=0, stdout=payload, stderr="")
+                if "docker" in joined and "logs" in joined:
+                    return RunResult(returncode=0, stdout=self._out,
+                                     stderr=self._err)
+                return RunResult(returncode=0, stdout="", stderr="")
+        runner = _StreamsRunner(
+            stdout="later traffic line (stdout)\n",
+            stderr=("0.12.593.897 I load_tensors:        CUDA0 model buffer "
+                    "size =  3524.46 MiB\n"),
+        )
         app, _, _ = make_app(runner=runner)
         app._active_mode = 1                  # keep the mode-0 estate poll out
         app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
@@ -3237,6 +3419,15 @@ class TestEstateVramSplit:
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app._vram_split and app._vram_split["ok"]
+            # #1118 follow-up regressions: the docker-logs read carries NO
+            # --tail (the boot lines live at the head of a long log), and the
+            # parser's temp log merged BOTH streams (stderr, where llama.cpp
+            # announces the buffers).
+            docker_logs_cmds = [c for c in runner.calls
+                                if c[:2] == ["docker", "logs"]]
+            assert docker_logs_cmds
+            assert all("--tail" not in c for c in docker_logs_cmds)
+            assert runner.parser_saw_load_tensors is True
             rail = app.query_one("#rail-status", RailStatus)
             assert "VRAM split · estate" in rail.render().plain
             app.action_estate_vram_cycle()           # estate -> CUDA0
@@ -5444,7 +5635,7 @@ class TestValidateRunWired:
         gated execute_action — it never claims a GPU."""
         wr = FakeWriteRunner()
 
-        async def detect_should_not_be_called():
+        async def detect_should_not_be_called(**_kwargs):
             raise AssertionError("a validation run must not reconcile")
 
         app, _, _ = make_app(write_runner=wr, surface="producer")
@@ -5994,7 +6185,11 @@ class TestPromoteHookWired:
             _spec = json.loads(app.screen._plan.env["C3_PROMOTE_SPEC"])
             assert _spec["display_name"] == "Qwen3 27B Abliterated"
             assert _spec["family"] == "qwen3-dense"
-            assert _spec["registry_entry"]["slug"].startswith("local/")
+            # #1202 P3: engine namespace, not `local/`. `--layer local` above is
+            # what keeps the write inside the gitignored layer.
+            _slug = _spec["registry_entry"]["slug"]
+            assert not _slug.startswith("local/")
+            assert _slug.count("/") == 1, _slug
             # #1156: THIS assertion was missing, and its absence let a plan that
             # promote.py always refuses (empty compose.content) pass as green.
             assert _spec["compose"]["content"].strip(), "spec.compose.content is empty"
@@ -8845,6 +9040,98 @@ def _count_load_estate(monkeypatch):
     return calls
 
 
+def _count_load_catalog(monkeypatch):
+    """Wrap CockpitApp.load_catalog so a test can count how many times it fired.
+    Returns the counter dict (``{"n": int}``)."""
+    import club3090_cockpit.app as appmod
+
+    calls = {"n": 0}
+    orig = appmod.CockpitApp.load_catalog
+
+    def counting(self):
+        calls["n"] += 1
+        return orig(self)
+
+    monkeypatch.setattr(appmod.CockpitApp, "load_catalog", counting)
+    return calls
+
+
+class TestRegistryWriteRereadsCatalog:
+    """A registry-mutating write re-reads the CATALOG (not just the estate).
+
+    Regression: removing a slug from the local-layer view left it on screen
+    until the user pressed [r] by hand — the write path re-polled the estate
+    (the rig) but never the registry (what actually changed)."""
+
+    @pytest.mark.asyncio
+    async def test_local_remove_rereads_catalog(self, monkeypatch):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        calls = _count_load_catalog(monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            before = calls["n"]
+            plan = app._data.local_amend_plan("remove", "my-engine/my-model")
+            assert plan.kind == "local_remove"
+            app.dispatch_action(plan)
+            await _settle(pilot)
+            assert calls["n"] > before      # the removal re-read the registry
+            assert len(wr.started) == 1     # gate intact — the write went through
+
+    @pytest.mark.asyncio
+    async def test_local_rename_and_update_reread_catalog(self, monkeypatch):
+        for kind, kw in (("rename", {"to": "my-engine/renamed"}),
+                         ("update", {"sets": ["workload=fast-chat"]})):
+            wr = FakeWriteRunner()
+            app, _, _ = make_app(write_runner=wr)
+            calls = _count_load_catalog(monkeypatch)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _settle(pilot)
+                before = calls["n"]
+                plan = app._data.local_amend_plan(kind, "my-engine/my-model", **kw)
+                assert plan.kind == f"local_{kind}"
+                app.dispatch_action(plan)
+                await _settle(pilot)
+                assert calls["n"] > before, kind
+                assert len(wr.started) == 1, kind
+
+    @pytest.mark.asyncio
+    async def test_non_registry_write_does_not_reread_catalog(self, monkeypatch):
+        """NEGATIVE CONTROL — a write that doesn't touch the registry (container
+        rm) must NOT re-read the catalog, or the assertion above would pass for
+        every plan kind and prove nothing."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        calls = _count_load_catalog(monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            before = calls["n"]
+            plan = app._data.container_rm("vllm-qwen36-27b-dual")
+            app.dispatch_action(plan)
+            await _settle(pilot)
+            assert len(wr.started) == 1     # it DID write
+            assert calls["n"] == before     # but the registry didn't change
+
+    @pytest.mark.asyncio
+    async def test_refused_write_does_not_reread_catalog(self, monkeypatch):
+        """NEGATIVE CONTROL — a write REFUSED at the gate never mutated the
+        registry, so it must not re-read it either."""
+        wr = FakeWriteRunner()
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        gpus = [GpuInfo(index=0, mem_used_mib=22000), GpuInfo(index=1, mem_used_mib=1)]
+        app, _, _ = make_app(
+            responses=responses, gpus=gpus, target=ServingTarget(gpus=gpus), write_runner=wr
+        )
+        calls = _count_load_catalog(monkeypatch)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _enter_operate(pilot)
+            before = calls["n"]
+            app.dispatch_action(app._data.serve("vllm/dual"))   # not forced → refused
+            await _settle(pilot)
+            assert wr.started == []
+            assert calls["n"] == before
+
+
 class TestBatch2A1RepollAfterEveryWrite:
     """A1 — every SUCCESSFUL GPU-mutating write re-polls the estate; a REFUSED
     write does not."""
@@ -9379,7 +9666,7 @@ class TestBatch2MustFix3ErrorLabel:
         """Force the services.py detect-failure path → state.error is
         'detect failed: …' and the rail/Containers render THAT, not 'docker
         unreachable'."""
-        async def _boom():
+        async def _boom(**_kwargs):
             raise RuntimeError("endpoint probe blew up")
 
         app, _, _ = make_app()
@@ -12637,7 +12924,32 @@ class TestProfileTemplateDerivation:
         # representative (vllm/qwen38-27b-multi8-*). Same shape as the #905 note
         # above: an entirely incubating group still gets a representative, which is
         # rule (d) working as designed, not a regression.
-        assert len(opts) == 10, f"expected 10 reps, got {len(opts)}: {[o.slug for o in opts]}"
+        # LOCAL-AWARE. This reads the REAL registry, so a model the user has
+        # registered on this rig legitimately adds groups: a local slug on its own
+        # engine creates a new (engine, topology) pair and a representative for it.
+        # Counting those would make the guard fail for anyone who has used the
+        # local layer — the #1213 lesson, where hardcoded core counts went red the
+        # moment a local model existed. Count the CURATED reps and let local ones
+        # ride along.
+        import subprocess as _sp, sys as _sys
+        _local = set()
+        try:
+            _out = _sp.run(
+                [_sys.executable, "-c",
+                 "import sys;sys.path.insert(0,'.');"
+                 "from scripts.lib.profiles.compose_registry import local_entries;"
+                 "print('\\n'.join(e['slug'] for e in local_entries()))"],
+                capture_output=True, text=True, timeout=60, cwd=str(repo_root),
+            )
+            if _out.returncode == 0:
+                _local = {l.strip() for l in _out.stdout.splitlines() if l.strip()}
+        except (OSError, _sp.TimeoutExpired):
+            pass
+        core_opts = [o for o in opts if o.slug not in _local]
+        assert len(core_opts) == 10, (
+            f"expected 10 curated reps, got {len(core_opts)}: "
+            f"{[o.slug for o in core_opts]} (local: {sorted(_local)})"
+        )
 
         # The 1-card rig default must be FUNCTIONAL + non-incubating — ideally the
         # registry's curated single default (vllm/minimal).
@@ -12667,6 +12979,95 @@ class TestProfileTemplateDerivation:
                     f"rep {o.slug!r} is {o.status!r} but its ({fam},{o.topology}) "
                     f"group has a functional sibling"
                 )
+
+
+class TestRigTopologyLadder:
+    """The rig default understands rigs bigger than this one.
+
+    The picker asked only for "single" (1 card) or "dual" (anything more), so a 4-
+    or 8-GPU rig was offered DUAL templates while the multi4/multi8 slugs it wanted
+    were reachable only through the custom escape hatch.  This rig has TWO cards, so
+    every count below is otherwise untestable.
+    """
+
+    def _mk(self, slug, engine, path, status="production"):
+        return VariantRow(
+            slug=slug, switch_engine=engine, launch_engine=engine,
+            compose_dir=path.rsplit("/", 1)[0], file=path.rsplit("/", 1)[1],
+            port=8000, model="q", engine=engine, kvcalc_key="k", container="c",
+            compose_path=path, status=status, ctx_label="262K", status_note="",
+        )
+
+    def _full_ladder_rows(self):
+        return [
+            self._mk("vllm/single", "vllm-stable", "models/q/vllm/compose/single/aq/base.yml"),
+            self._mk("vllm/dual", "vllm-stable", "models/q/vllm/compose/dual/aq/fp8.yml"),
+            self._mk("vllm/multi4", "vllm-stable", "models/q/vllm/compose/multi4/aq/fp8.yml"),
+            self._mk("vllm/multi8", "vllm-stable", "models/q/vllm/compose/multi8/aq/fp8.yml"),
+        ]
+
+    def test_exact_topology_per_card_count(self):
+        opts = profile_templates(self._full_ladder_rows())
+        assert default_profile_template(opts, 1) == "vllm/single"
+        assert default_profile_template(opts, 2) == "vllm/dual"
+        assert default_profile_template(opts, 4) == "vllm/multi4"
+        assert default_profile_template(opts, 8) == "vllm/multi8"
+
+    def test_counts_without_a_topology_take_the_largest_that_fits(self):
+        """3 -> dual (no multi3 composes exist), 5-7 -> multi4, >8 -> multi8.  The
+        alternative — inventing multi3/multi5 — names slugs the registry does not
+        have."""
+        opts = profile_templates(self._full_ladder_rows())
+        assert default_profile_template(opts, 3) == "vllm/dual"
+        for n in (5, 6, 7):
+            assert default_profile_template(opts, n) == "vllm/multi4", f"{n} cards"
+        assert default_profile_template(opts, 16) == "vllm/multi8"
+
+    def test_degrades_when_the_rig_topology_has_no_option(self):
+        """A 4-card rig on a registry with no multi4 slug lands on dual — the
+        largest that fits and exists — not on a single-card slug picked by sort
+        order, which is what "first option" used to hand it."""
+        rows = [
+            self._mk("vllm/single", "vllm-stable", "models/q/vllm/compose/single/aq/base.yml"),
+            self._mk("vllm/dual", "vllm-stable", "models/q/vllm/compose/dual/aq/fp8.yml"),
+        ]
+        opts = profile_templates(rows)
+        assert default_profile_template(opts, 4) == "vllm/dual"
+        assert default_profile_template(opts, 8) == "vllm/dual"
+
+    def test_status_floor_outranks_topology_fit(self):
+        """FIX 2's floor is preserved: a launchable DUAL beats an incubating multi4
+        on a 4-card rig.  A Select default must be launchable; degrading topology is
+        the cheaper concession."""
+        rows = [
+            self._mk("vllm/dual", "vllm-stable", "models/q/vllm/compose/dual/aq/fp8.yml"),
+            self._mk("vllm/multi4", "vllm-stable",
+                     "models/q/vllm/compose/multi4/aq/fp8.yml", status="incubating"),
+        ]
+        opts = profile_templates(rows)
+        assert default_profile_template(opts, 4) == "vllm/dual"
+
+    def test_non_functional_only_still_returns_a_real_option(self):
+        """The invariant that outlives every rule here: a Select cannot default to a
+        value absent from its options."""
+        rows = [
+            self._mk("vllm/multi4", "vllm-stable",
+                     "models/q/vllm/compose/multi4/aq/fp8.yml", status="incubating"),
+        ]
+        opts = profile_templates(rows)
+        slugs = {o.slug for o in opts}
+        for n in (1, 2, 4, 8):
+            assert default_profile_template(opts, n) in slugs, f"{n} cards"
+
+    def test_ladder_shape(self):
+        from club3090_cockpit.app import _topology_ladder
+
+        assert _topology_ladder(1) == ["single"]
+        assert _topology_ladder(2) == ["dual", "single"]
+        assert _topology_ladder(4) == ["multi4", "dual", "single"]
+        assert _topology_ladder(8) == ["multi8", "multi4", "dual", "single"]
+        # Degenerate inputs must not produce an empty ladder.
+        assert _topology_ladder(0) == ["single"]
 
 
 class TestCatalogPreview:
@@ -14275,7 +14676,7 @@ class TestAdaptiveEstatePoll:
             return ["g0", "g1"]
         cd._get_gpu_info = ok
         assert asyncio.run(cd.gpu_info()) == ["g0", "g1"]
-        async def boom():
+        async def boom(**_kwargs):
             raise RuntimeError("nvidia-smi gone")
         cd._get_gpu_info = boom
         assert asyncio.run(cd.gpu_info()) == []   # degrades, never raises

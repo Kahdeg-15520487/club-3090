@@ -141,7 +141,7 @@ def _model_spec():
 
 
 def make_detect(target: ServingTarget):
-    async def _detect() -> ServingTarget:
+    async def _detect(**_kwargs) -> ServingTarget:
         return target
     return _detect
 
@@ -951,6 +951,62 @@ class TestLoadCatalog:
         (comp / "d.gguf").write_text("x")                  # now the companion is here too
         await cd.enrich_weights([e], model_dir=str(tmp_path))
         assert e.weights_state == WEIGHTS_PRESENT
+
+    @pytest.mark.asyncio
+    async def test_weights_state_absent_when_nested_glob_variant_dir_removed(self, tmp_path):
+        """A variant whose verify_glob carries its own directory component (e.g.
+        subdir=glm-5.3-flash-gguf, verify_glob=UD-IQ4_XS/*.gguf) must read ABSENT once
+        that variant dir is deleted -- even while SIBLING variants keep the shared
+        parent on disk.
+
+        Regression: `base` was the shared PARENT, so `base.is_dir()` stayed true for as
+        long as any sibling existed and ABSENT was UNREACHABLE -- a cleanly deleted
+        variant reported PARTIAL forever, and the UI offered "Download resumes it" for
+        a 100-250 GB fresh pull with nothing to resume. Hit on glm-5.3-flash iq4xs /
+        iq3xxs; 9 of 87 weights entries carry a nested glob like this.
+        """
+        from club3090_cockpit.data import (
+            CatalogEntry, WEIGHTS_PRESENT, WEIGHTS_ABSENT,
+        )
+
+        listing = json.dumps([
+            {"model": "glm-5.3-flash", "variant": "unsloth-ud-iq4xs",
+             "subdir": "glm-5.3-flash-gguf", "hf_repo": "unsloth/x",
+             "size_gb": 100.0, "verify_glob": "UD-IQ4_XS/*.gguf",
+             "status": "experimental"},
+        ])
+        cd = CockpitData(ROOT, runner=full_runner(**{"weights.py list --json": ok(listing)}))
+        hf = tmp_path
+        parent = hf / "glm-5.3-flash-gguf"
+        variant = parent / "UD-IQ4_XS"
+        sibling = parent / "dflash2"          # a DIFFERENT variant sharing the parent
+        variant.mkdir(parents=True)
+        sibling.mkdir(parents=True)
+        (variant / "w.gguf").write_text("x")
+        (sibling / "d.gguf").write_text("x")
+
+        e = CatalogEntry(row=_variant_row_from_dict({
+            "slug": "llamacpp-club3090/glm53-flash-dual-iq4xs-moecache", "port": 8099,
+            "model": "glm-5.3-flash", "switch_engine": "llamacpp-club3090",
+            "launch_engine": "llamacpp-club3090", "engine": "llamacpp-club3090-v1.6",
+            "compose_dir": "models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs",
+            "file": "moecache.yml",
+            "compose_path": "models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/moecache.yml",
+            "kvcalc_key": "SKIP", "container": "c", "status": "experimental",
+            "ctx_label": "", "status_note": "",
+        }))
+        await cd.enrich_weights([e], model_dir=str(tmp_path))
+        assert e.weights_state == WEIGHTS_PRESENT
+
+        # Delete ONLY this variant. The shared parent survives via the sibling.
+        (variant / "w.gguf").unlink()
+        variant.rmdir()
+        assert parent.is_dir() and sibling.is_dir()          # parent still populated
+        await cd.enrich_weights([e], model_dir=str(tmp_path))
+        assert e.weights_state == WEIGHTS_ABSENT, (
+            f"cleanly-deleted nested-glob variant read {e.weights_state!r}; "
+            "ABSENT must be reachable even when siblings keep the parent alive"
+        )
 
     def test_download_progress_aggregates_core_and_companion(self, tmp_path):
         """Live-progress regression: progress must aggregate bytes across the WHOLE
@@ -2287,7 +2343,7 @@ class TestReconcileGate:
     @pytest.mark.asyncio
     async def test_detect_failure_is_unsafe(self):
         """If detect raises, we can't prove the cards are free → not safe."""
-        async def boom() -> ServingTarget:
+        async def boom(**_kwargs) -> ServingTarget:
             raise RuntimeError("docker daemon down")
 
         cd = CockpitData(ROOT, runner=full_runner(), detect_endpoint_fn=boom)
@@ -2300,7 +2356,7 @@ class TestReconcileGate:
         """The gate must call detect every time (never a cached snapshot)."""
         calls = {"n": 0}
 
-        async def counting_detect() -> ServingTarget:
+        async def counting_detect(**_kwargs) -> ServingTarget:
             calls["n"] += 1
             return ServingTarget(gpus=[GpuInfo(index=0, mem_used_mib=1), GpuInfo(index=1, mem_used_mib=1)])
 
@@ -2534,7 +2590,7 @@ class TestExecuteActionGated:
         """set_default has requires_reconcile=False → no detect, straight to run."""
         write_runner = FakeWriteRunner()
 
-        async def detect_should_not_be_called() -> ServingTarget:
+        async def detect_should_not_be_called(**_kwargs) -> ServingTarget:
             raise AssertionError("detect must not be called for a non-reconcile action")
 
         cd = CockpitData(
@@ -2576,7 +2632,7 @@ class TestExecuteActionGated:
         the gate is genuinely skipped (detect never called)."""
         write_runner = FakeWriteRunner()
 
-        async def detect_should_not_be_called() -> ServingTarget:
+        async def detect_should_not_be_called(**_kwargs) -> ServingTarget:
             raise AssertionError("gate must be skipped → detect not called")
 
         cd = CockpitData(
@@ -3823,7 +3879,7 @@ class TestPhase4RunValidation:
         """Validation hits the model but does not claim a GPU → no detect call."""
         wr = FakeWriteRunner()
 
-        async def detect_should_not_be_called():
+        async def detect_should_not_be_called(**_kwargs):
             raise AssertionError("validation must not run the reconcile gate")
 
         cd = CockpitData(
@@ -3866,7 +3922,7 @@ class TestPhase4GatedWriteExecution:
         reaches the mocked write runner with the gpu-mode power-cap <W> command."""
         write_runner = FakeWriteRunner()
 
-        async def detect_should_not_be_called():
+        async def detect_should_not_be_called(**_kwargs):
             raise AssertionError("power-cap must not reconcile (no GPU contention)")
 
         cd = CockpitData(
@@ -3989,7 +4045,12 @@ class TestPromoteScaffold:
         # C4-rev: LOCAL layer by default — gitignored paths + local/ namespace.
         assert sc.layer == "local"
         assert sc.profile_path.startswith("scripts/lib/profiles-local/models.d/")
-        assert sc.registry_slug.startswith("local/")
+        # #1202 P3: the slug carries the ENGINE namespace, like a curated row —
+        # `local/` used to squat in that slot. The LAYER (asserted above) still
+        # decides where the files go; it no longer decides what the slug is called.
+        assert not sc.registry_slug.startswith("local/")
+        assert sc.registry_slug.count("/") == 1, sc.registry_slug
+        assert sc.registry_slug.split("/", 1)[0] == "vllm", sc.registry_slug
         assert sc.spec["compose"]["path"].startswith(
             "scripts/lib/profiles-local/composes/"
         )

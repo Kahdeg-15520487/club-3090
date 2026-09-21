@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
 #
 # rebench-full.sh — canonical rebench against the currently-running model
 # (a fail-fast verify-full preflight + 5 measured steps). Built to eliminate
@@ -318,14 +320,14 @@ echo
 # preflight uses. Silently no-ops in endpoint-first mode (CONTAINER=none).
 if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1; then
   CONTAINER_NAME=$(docker ps --format '{{.Names}}' 2>/dev/null \
-    | grep -E '^(vllm-|llama-cpp-|sglang-)' | head -1 || true)
+    | command grep -E "$(club_container_re)" | head -1 || true)
   if [[ -n "$CONTAINER_NAME" ]]; then
     docker inspect "$CONTAINER_NAME" > "$OUT_DIR/container-config.json" 2>/dev/null || true
     # Boot log: capture lines that the report parser needs (KV pool size,
     # max concurrency, model load footprint, MTP detection). Trimmed to keep
     # the file small; full container log is still available via `docker logs`.
     docker logs "$CONTAINER_NAME" 2>&1 \
-      | grep -E "GPU KV cache size|Maximum concurrency|Available KV cache memory|Model loading took|Detected MTP|kv_cache_dtype|num_speculative_tokens" \
+      | command grep -E "GPU KV cache size|Maximum concurrency|Available KV cache memory|Model loading took|Detected MTP|kv_cache_dtype|num_speculative_tokens" \
       > "$OUT_DIR/vllm-boot.log" 2>/dev/null || true
   fi
 fi

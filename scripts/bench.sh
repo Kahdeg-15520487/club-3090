@@ -288,6 +288,11 @@ fi
 # Auto-detect running container + port (URL/CONTAINER env vars still win).
 # See scripts/preflight.sh::preflight_autodetect_endpoint.
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Canonical engine classification (club-3090#1282). Sourced UNCONDITIONALLY —
+# it was briefly nested under the registry-lookup guard, which would have left
+# engine_kind_* undefined at the call site if that sibling were absent.
+# shellcheck source=lib/engine-kind.sh
+source "${ROOT_DIR}/scripts/lib/engine-kind.sh"
 if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   # shellcheck source=preflight.sh
   source "${ROOT_DIR}/scripts/preflight.sh"
@@ -343,6 +348,14 @@ fi
 CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
 RUNS="${RUNS:-5}"
 WARMUPS="${WARMUPS:-3}"
+
+# ---- #1076: engine-restart guard -------------------------------------------
+# A fatal engine error mid-bench gets masked by the restart policy: the container
+# comes back and the remaining runs measure a freshly-booted engine, so the
+# numbers silently mix two different engine lifetimes. Snapshot now, compare at
+# the end. See scripts/lib/engine-restart-guard.sh.
+source "${ROOT_DIR}/scripts/lib/engine-restart-guard.sh"
+_RESTARTS_BEFORE="$(restart_guard_snapshot)"
 MAX_TOKENS_NARR="${MAX_TOKENS_NARR:-1000}"
 MAX_TOKENS_CODE="${MAX_TOKENS_CODE:-800}"
 PROMPT_NARR="${PROMPT_NARR:-Write a detailed 800-word essay explaining transformer attention.}"
@@ -427,11 +440,12 @@ ENGINE_KIND="${ENGINE_KIND:-unknown}"
 if [[ "$ENGINE_KIND" == "unknown" && "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
   container_image="$(docker inspect --format '{{.Config.Image}}' "${CONTAINER}" 2>/dev/null || true)"
   container_name="$(docker inspect --format '{{.Name}}' "${CONTAINER}" 2>/dev/null || true)"
-  if [[ "${container_image} ${container_name}" == *"llama.cpp"* || "${container_image} ${container_name}" == *"llama-cpp"* ]]; then
-    ENGINE_KIND="llamacpp"
-  elif [[ "${container_image} ${container_name}" == *"vllm"* ]]; then
-    ENGINE_KIND="vllm"
-  fi
+  # club-3090#1261 gave SGLang its arm here; club-3090#1282 moved the rules to
+  # scripts/lib/engine-kind.sh so a new engine is added in ONE place. Image
+  # first, then the container name — both are just evidence for the same rules.
+  ENGINE_KIND="$(engine_kind_from_image "${container_image}")"
+  [[ "$ENGINE_KIND" == "unknown" ]] && ENGINE_KIND="$(engine_kind_from_image "${container_name}")"
+  [[ "$ENGINE_KIND" == "unknown" ]] && ENGINE_KIND="$(engine_kind_from_container "${container_name#/}")"
 fi
 
 PP_MODE="log"
@@ -550,7 +564,7 @@ sys.exit(0 if walk(obj) else 1)
      && command -v docker >/dev/null 2>&1 \
      && docker inspect "$CONTAINER" >/dev/null 2>&1; then
     docker inspect "$CONTAINER" 2>/dev/null \
-      | grep -Eq -- '(--reasoning[= ]+on|"--reasoning"[[:space:]]*,[[:space:]]*"on")' && return 0
+      | command grep -Eq -- '(--reasoning[= ]+on|"--reasoning"[[:space:]]*,[[:space:]]*"on")' && return 0
   fi
   return 1
 }
@@ -1604,7 +1618,19 @@ if (( CAP_ENABLED )); then
         }'
       fi
     else
-      echo "  no drafter output in the log (spec-dec off, or the engine does not log acceptance)"
+      # ⚠ THREE DIFFERENT STATES USED TO PRINT THIS ONE LINE. Until 2026-09-11 the
+      # parser knew only vLLM's "draft acceptance rate =" wording, so every SGLang
+      # run landed here — including a DEAD DFlash2 drafter (accept len ~1.0,
+      # sglang#39087), which is slow but never wrong and passes every functional
+      # test. "Nothing to report" and "I cannot read this engine" must not look the
+      # same. Recognised wordings: vLLM `draft acceptance rate = X`; SGLang
+      # `accept len: X, accept rate: Y`.
+      echo "  no acceptance data in the measured window. Either spec-dec is OFF for this"
+      echo "  run, or this engine words its acceptance line differently and the parser"
+      echo "  (scripts/lib/capture.sh, mode=acceptance) has not been taught it."
+      echo "  ⚠ Do NOT read this as 'the drafter is fine' — verify it fired:"
+      echo "      docker logs <container> 2>&1 | grep -oE 'accept len: [0-9.]+' | tail"
+      echo "      healthy is 2-5; ~1.0 means the drafter is drafting garbage"
     fi
   fi
 
@@ -2143,7 +2169,10 @@ bench_interconnect_block() {
   eng_text=""
   if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
      && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
-    eng_text="$(docker logs "$CONTAINER" 2>&1 | command grep -E '\[nvlink\]|Custom allreduce is disabled|disable_custom_all_reduce=True' | head -8 || true)"
+    # ⚠️ NO head/-m1. The classifier slices the log to the CURRENT BOOT using the
+    # last [nvlink] STATE line; taking the FIRST matches hands it an older boot's
+    # record and it reports the wrong rig (#1332 review). Feed the log in order.
+    eng_text="$(docker logs "$CONTAINER" 2>&1 | command grep -E '\[nvlink\]|Custom allreduce is disabled|disable_custom_all_reduce=True' || true)"
   fi
   if [[ "$ENGINE_KIND" == "llamacpp" || "${CONTAINER:-}" == "none" ]]; then
     # llama.cpp/ik-llama split layers across cards with plain copies — there is
@@ -2153,7 +2182,10 @@ bench_interconnect_block() {
   else
     case "$(printf '%s\n%s' "$eng_text" "$nccl_line" | p2p_classify_engagement 2>/dev/null || echo unknown)" in
       on)        l3="ENGAGED — engine reports its custom all-reduce ON" ;;
-      nccl_only) l3="custom-AR OFF, P2P LIVE — the engine is not using its custom all-reduce; peer transfers still go via NCCL. Cause is either vLLM's own NVLink-only gate at world>2 (#786) or an operator-supplied --disable-custom-all-reduce (#922). Check the engine log to tell which; both are healthy states" ;;
+      nccl_only_operator) l3="custom-AR OFF (operator), P2P LIVE — --disable-custom-all-reduce / DISABLE_CUSTOM_ALL_REDUCE=1. Peer transfers still go via NCCL. Healthy, deliberate" ;;
+      nccl_only_gated)    l3="custom-AR OFF (engine-gated), P2P LIVE — vLLM's NVLink-only gate at world>2 (#786). Peer transfers still go via NCCL. Healthy" ;;
+      nccl_only_degraded) l3="⚠️ custom-AR OFF (P2P BROKEN) — the engine refused its kernel because peer access is missing or its P2P TEST FAILED. NOT an operator choice and NOT healthy; the grant can be advertised while transfers fail (#873). Run scripts/p2p-validate.sh" ;;
+      nccl_only_nolib)    l3="custom-AR unavailable — this image has no custom all-reduce library. Peer transfers still go via NCCL" ;;
       off)       l3="OFF — the serving container resolved to PCIe/no-P2P mode" ;;
       requested) l3="REQUESTED but UNVERIFIED — P2P forced on without a driver grant (#688)" ;;
       *)         l3="unknown — no [nvlink] boot line and no engine gate line in the log" ;;
@@ -2175,7 +2207,14 @@ if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
    && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
   echo ""
   echo "=== Last 3 SpecDecoding metrics ==="
-  docker logs "${CONTAINER}" 2>&1 | grep "SpecDecoding metrics" | tail -3 || true
+  # vLLM tags these "SpecDecoding metrics"; SGLang writes "accept len: N, accept rate: N"
+  # on its decode-batch line and llama.cpp writes "draft acceptance = N". Grepping only
+  # the vLLM string printed an EMPTY block on the other two — which reads as "spec-dec
+  # produced nothing" rather than "I only know one engine's wording". Seen in the wild on
+  # club-3090#1251 (2x 5090, sgl/qwen38-27b-dual-fast): the section came back blank while
+  # the drafter was running fine.
+  docker logs "${CONTAINER}" 2>&1 \
+    | command grep -E "SpecDecoding metrics|accept len:|draft acceptance" | tail -3 || true
 fi
 
 # Repeated at the END on purpose (#832): a reader who tails the log, or who
@@ -2204,4 +2243,13 @@ if [[ -n "${_BENCH_REC_LOG:-}" && -f "${_BENCH_REC_LOG}" && "${QUICK:-0}" != "1"
     --resolve-serving --serving-url "$URL" --result-class bench-measured \
     --bench-output "${_BENCH_REC_LOG}" >/dev/null 2>&1 || true
   rm -f "${_BENCH_REC_LOG}"
+fi
+
+# ---- #1076: did the engine restart during this bench? -----------------------
+# Last, so it cannot suppress the summary — but non-zero, because a bench that
+# spans an engine restart is not a measurement. BENCH_MOCK runs have no real
+# container and skip cleanly via the guard's own unavailable path.
+if [[ -z "${BENCH_MOCK:-}" ]]; then
+  restart_guard_check "${_RESTARTS_BEFORE:-}" "${CONTAINER:-}" "bench" || _RESTART_RC=$?
+  [[ "${_RESTART_RC:-0}" == "1" ]] && exit 90
 fi

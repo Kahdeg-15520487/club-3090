@@ -10,10 +10,12 @@
 #   bash scripts/switch.sh <variant>            # switch + tail until ready
 #   bash scripts/switch.sh <variant> --no-wait  # switch and return immediately
 #   bash scripts/switch.sh --force <variant>    # skip hardware/free-VRAM preflight
-#   bash scripts/switch.sh --owui <variant>     # after ready, also register it in Open WebUI (no-op if OWUI down)
+#   bash scripts/switch.sh <variant>            # OWUI picker is synced automatically once ready (no-op if OWUI down)
+#   bash scripts/switch.sh --no-owui <variant>  # ...unless you opt out
 #   bash scripts/switch.sh --list               # actionable variants on THIS machine (deprecated hidden) + defaults
 #   bash scripts/switch.sh --list --all         # every variant — all GPU counts + deprecated
 #   bash scripts/switch.sh --list-all           # alias for --list --all
+#   bash scripts/switch.sh --local              # only models YOU registered (local layer)
 #   bash scripts/switch.sh --defaults           # just the per-model defaults view
 #   bash scripts/switch.sh --down               # just bring down whatever's up
 #   bash scripts/switch.sh --set-default <slug>  # pin <slug> as YOUR default for its model (.env)
@@ -270,7 +272,7 @@ env_set_key() {
   tmp="$(mktemp)"
   if [[ -f "$ENV_FILE" ]]; then
     # Drop any existing assignment for KEY (with or without `export`).
-    grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" > "$tmp" || true
+    command grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" > "$tmp" || true
   fi
   printf '%s=%s\n' "$key" "$value" >> "$tmp"
   mv "$tmp" "$ENV_FILE"
@@ -281,7 +283,7 @@ env_clear_key() {
   local key="$1" tmp
   [[ -f "$ENV_FILE" ]] || return 0
   tmp="$(mktemp)"
-  grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" > "$tmp" || true
+  command grep -vE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" > "$tmp" || true
   mv "$tmp" "$ENV_FILE"
 }
 
@@ -313,7 +315,7 @@ from scripts.lib.profiles.compose_registry import model_default_pin_key  # noqa:
 print(model_default_pin_key(sys.argv[2]))
 PY_CLEARKEY
 )"
-  if [[ -f "$ENV_FILE" ]] && grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE"; then
+  if [[ -f "$ENV_FILE" ]] && command grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE"; then
     env_clear_key "$key"
     echo "[switch] cleared your pinned default for ${model} (removed ${key} from .env)."
   else
@@ -454,6 +456,20 @@ list_variants() {
   # DEVICES then nvidia-smi). `--list --all` (LIST_ALL=1) shows everything for
   # discoverability. Fail-open: if detection is unavailable we show ALL rather
   # than hide based on a failed probe.
+  # Provenance (#1202). Local rows were INDISTINGUISHABLE in this listing: nothing
+  # rendered a marker, which mattered little while they lived under a `local/`
+  # namespace and matters a lot now they share the curated <engine>/<name> shape.
+  declare -A _is_local=(); local _shadowed=""
+  if declare -F registry_local_slugs >/dev/null; then
+    local _k _v
+    while IFS=$'\t' read -r _k _v; do
+      case "$_k" in
+        LOCAL)    _is_local["$_v"]=1 ;;
+        SHADOWED) _shadowed+="${_shadowed:+, }$_v" ;;
+      esac
+    done < <(registry_local_slugs "$ROOT_DIR" 2>/dev/null)
+  fi
+
   local show_all="${LIST_ALL:-0}" detected_topo max_rank
   detected_topo="$(switch_topology_from_gpus 2>/dev/null || true)"
   if [[ -z "$detected_topo" ]] || ! list_gpu_detect_reliable; then
@@ -497,6 +513,9 @@ list_variants() {
       _hidden_by_topo["$_vtopo"]=$(( ${_hidden_by_topo["$_vtopo"]:-0} + 1 ))
       continue
     fi
+    if [[ "${LIST_LOCAL:-0}" == "1" && -z "${_is_local[$v]:-}" ]]; then
+      continue                       # --local: yours only
+    fi
     _seen_models["${_ds[1]:-?}"]=1
     case "${VARIANT_STATUS[$v]:-production}" in
       production) _prod=$((_prod + 1)) ;;
@@ -535,6 +554,13 @@ list_variants() {
   if [[ "$_inc_hidden" -gt 0 ]]; then
     _inc_note="  (+${_inc_hidden} incubating hidden — --all)"
   fi
+  if [[ -n "$_shadowed" ]]; then
+    echo ""
+    echo "  ⚠ shadowed local slug(s): ${_shadowed}"
+    echo "    A curated entry now ships under that name, and core wins the lookup."
+    echo "    Your registration is intact but unreachable by slug — rename it:"
+    echo "      bash scripts/catalog.sh unregister --slug <slug>   # then re-register under another name"
+  fi
   echo "  Models: ${#_seen_models[@]} · variants: ${_visible} (${_prod} production · ${_cav} caveats · ${_na} NA)${_hidden_note}${_dep_note}${_gated_note}${_inc_note}"
 
   {
@@ -544,6 +570,10 @@ list_variants() {
       IFS=/ read -ra fseg <<< "$file"   # fseg[0]=topology fseg[1]=quant fseg[2]=serving
       topo="${fseg[0]:-unknown}"
       rank="$(topology_rank "$topo")"
+      # --local applies HERE too. Listing is two passes — one that counts, one
+      # that renders — and filtering only the first produced a header saying
+      # "variants: 1" above every curated row.
+      if [[ "${LIST_LOCAL:-0}" == "1" && -z "${_is_local[$v]:-}" ]]; then continue; fi
       if [[ "$show_all" != "1" ]]; then
         case "${VARIANT_STATUS[$v]:-production}" in deprecated|upstream-gated|incubating) continue ;; esac
       fi
@@ -551,8 +581,9 @@ list_variants() {
         continue
       fi
       marker="$(status_marker "${VARIANT_STATUS[$v]:-production}")"
-      printf '%s\t%d\t%s\t%s\t%s/%s\t%s\t%s\n' \
-        "${dseg[1]:-?}" "$rank" "$topo" "$v" "${fseg[1]:-?}" "${fseg[2]:-${file}}" "$marker" "${VARIANT_CTX[$v]:-}"
+      printf '%s\t%d\t%s\t%s\t%s/%s\t%s\t%s\t%s\n' \
+        "${dseg[1]:-?}" "$rank" "$topo" "$v" "${fseg[1]:-?}" "${fseg[2]:-${file}}" "$marker" "${VARIANT_CTX[$v]:-}" \
+        "${_is_local[$v]:+local}"
     done
   } | LC_ALL=C sort -t$'\t' -k1,1 -k2,2n -k4,4 | awk -F'\t' '
     { rows[NR] = $0; cnt[$1]++ }
@@ -566,6 +597,9 @@ list_variants() {
           if (ann == "") ann = ctx                  # production: bare max-ctx (stays "unmarked")
           else sub(/\)$/, ", " ctx ")", ann)         # caveats / NA: fold ctx into the paren
         }
+        # provenance: yours vs shipped. Local rows look exactly like curated ones
+        # since #1202 gave them the same <engine>/<name> shape, so say it.
+        if (f[8] != "") ann = (ann == "" ? "local" : ann " · local")
         printf "  %-8s %-34s %-36s %s\n", tl, f[4], f[5], ann
       }
     }
@@ -924,6 +958,17 @@ down_running() {
     fi
   done
   [[ "$brought_down" -eq 1 ]] || echo "[switch] no club-3090 container running"
+  # Teardown must prune too, or `--down` leaves the OWUI picker advertising a
+  # model that is no longer serving — the same stale-entry class that let seven
+  # dead connections accumulate. Only club-owned ports are eligible, and it is a
+  # no-op when OWUI is not running, so this is safe on every teardown path.
+  if [[ "${OWUI_REGISTER:-1}" -eq 1 ]]; then
+    bash "$(dirname "$0")/lib/owui-register.sh" --prune-only || true
+  fi
+  # Same for the gateway: after a teardown its local routes point at ports that
+  # are no longer listening, which is the dead-route state this sync exists to
+  # prevent. Cloud routes are untouched.
+  bash "$(dirname "$0")/lib/litellm-sync.sh" --quiet || true
 }
 
 gpu_preflight() {
@@ -1010,17 +1055,60 @@ export_variant_engine_pin() {
       BEELLAMA_IMAGE) export BEELLAMA_IMAGE="$value" ;;
       # #246 arch-aware env (pilot slugs; hardware-profile balanced default)
       KV_CACHE_DTYPE)
-        export KV_CACHE_DTYPE="$value"
-        echo "[switch] arch-aware KV dtype: ${value} (hardware-profile default for detected GPUs — #246)" ;;
+        # #246 arch-aware default — but a value the USER set WINS, matching the .env
+        # precedence rule earlier in this script. An unconditional export silently
+        # clobbered an explicit `KV_CACHE_DTYPE=… scripts/switch.sh …` with no override path
+        # (reported on Discord for MAX_NUM_SEQS, 2026-09-11).
+        if [[ -n "${KV_CACHE_DTYPE:-}" ]]; then
+          echo "[switch] KV_CACHE_DTYPE: keeping your value ${KV_CACHE_DTYPE} (hardware profile suggested ${value})" >&2
+        else
+          export KV_CACHE_DTYPE="$value"
+          echo "[switch] arch-aware KV dtype: ${value} (hardware-profile default for detected GPUs — #246)"
+        fi ;;
       MAX_NUM_SEQS)
-        export MAX_NUM_SEQS="$value"
-        echo "[switch] memory-envelope concurrency: MAX_NUM_SEQS=${value} (measured for this card class — #246 Phase 2)" ;;
+        # #246 arch-aware default — but a value the USER set WINS, matching the .env
+        # precedence rule earlier in this script. An unconditional export silently
+        # clobbered an explicit `MAX_NUM_SEQS=… scripts/switch.sh …` with no override path
+        # (reported on Discord for MAX_NUM_SEQS, 2026-09-11).
+        if [[ -n "${MAX_NUM_SEQS:-}" ]]; then
+          echo "[switch] MAX_NUM_SEQS: keeping your value ${MAX_NUM_SEQS} (hardware profile suggested ${value})" >&2
+        else
+          export MAX_NUM_SEQS="$value"
+          echo "[switch] memory-envelope concurrency: MAX_NUM_SEQS=${value} (measured for this card class — #246 Phase 2)"
+        fi ;;
+      MAX_RUNNING_REQUESTS)
+        # SGLang's spelling of the same quantity (#1361). The envelope injector
+        # emits the engine family's own knob name; without this arm the `*)` below
+        # turns the first sglang envelope row into `exit 2`, i.e. an unlaunchable
+        # slug rather than a no-op. Caught by the #1363 matrix guard's static check.
+        if [[ -n "${MAX_RUNNING_REQUESTS:-}" ]]; then
+          echo "[switch] MAX_RUNNING_REQUESTS: keeping your value ${MAX_RUNNING_REQUESTS} (hardware profile suggested ${value})" >&2
+        else
+          export MAX_RUNNING_REQUESTS="$value"
+          echo "[switch] memory-envelope concurrency: MAX_RUNNING_REQUESTS=${value} (#246 Phase 2, sglang)"
+        fi ;;
       GPU_MEMORY_UTILIZATION)
-        export GPU_MEMORY_UTILIZATION="$value"
-        echo "[switch] memory-fraction floor: GPU_MEMORY_UTILIZATION=${value} (unified-memory card can't safely give the default — #246 Phase 2)" ;;
+        # #246 arch-aware default — but a value the USER set WINS, matching the .env
+        # precedence rule earlier in this script. An unconditional export silently
+        # clobbered an explicit `GPU_MEMORY_UTILIZATION=… scripts/switch.sh …` with no override path
+        # (reported on Discord for MAX_NUM_SEQS, 2026-09-11).
+        if [[ -n "${GPU_MEMORY_UTILIZATION:-}" ]]; then
+          echo "[switch] GPU_MEMORY_UTILIZATION: keeping your value ${GPU_MEMORY_UTILIZATION} (hardware profile suggested ${value})" >&2
+        else
+          export GPU_MEMORY_UTILIZATION="$value"
+          echo "[switch] memory-fraction floor: GPU_MEMORY_UTILIZATION=${value} (unified-memory card can't safely give the default — #246 Phase 2)"
+        fi ;;
       VLLM_USE_DEEP_GEMM)
-        export VLLM_USE_DEEP_GEMM="$value"
-        echo "[switch] fp8 weights: VLLM_USE_DEEP_GEMM=${value} (consumer card has no DeepGEMM recipe — disc #571)" ;;
+        # #246 arch-aware default — but a value the USER set WINS, matching the .env
+        # precedence rule earlier in this script. An unconditional export silently
+        # clobbered an explicit `VLLM_USE_DEEP_GEMM=… scripts/switch.sh …` with no override path
+        # (reported on Discord for MAX_NUM_SEQS, 2026-09-11).
+        if [[ -n "${VLLM_USE_DEEP_GEMM:-}" ]]; then
+          echo "[switch] VLLM_USE_DEEP_GEMM: keeping your value ${VLLM_USE_DEEP_GEMM} (hardware profile suggested ${value})" >&2
+        else
+          export VLLM_USE_DEEP_GEMM="$value"
+          echo "[switch] fp8 weights: VLLM_USE_DEEP_GEMM=${value} (consumer card has no DeepGEMM recipe — disc #571)"
+        fi ;;
       VLLM_ATTENTION_BACKEND) export VLLM_ATTENTION_BACKEND="$value" ;;
       # #809 — the model's declared decode class. A block-diffusion (dLLM)
       # model has no measurable decode window on a single-canvas response,
@@ -1363,7 +1451,14 @@ FORCE="${FORCE:-0}"
 VARIANT=""
 LIST_REQUESTED=0
 LIST_ALL=0
-OWUI_REGISTER=0
+LIST_LOCAL=0
+# Default ON (2026-09-18). It was opt-in via --owui, which meant the common case
+# — launch a slug, open the picker — silently showed nothing, while the endpoints
+# that HAD been registered stayed forever because the helper was append-only.
+# Syncing on every launch is what makes "whatever is running is what you see"
+# true. Still safe to leave on: owui-register.sh is a no-op when OWUI is not
+# running, and it only ever prunes ports this repo owns.
+OWUI_REGISTER=1
 EXPLAIN_REQUESTED=0
 EXPLAIN_SLUG=""
 EXPLAIN_JSON=0
@@ -1376,6 +1471,11 @@ while [[ $# -gt 0 ]]; do
     --list) LIST_REQUESTED=1 ;;
     --all) LIST_ALL=1 ;;
     --list-all) LIST_REQUESTED=1; LIST_ALL=1 ;;
+    # --local: only the models YOU registered (catalog.sh / promote.py). Locality
+    # is the entry's `origin` field, never the slug string — local slugs carry the
+    # same <engine>/<name> shape as curated ones (#1202), so there is nothing in
+    # the name to filter on.
+    --local) LIST_REQUESTED=1; LIST_LOCAL=1; LIST_ALL=1 ;;
     # --explain <slug> [--json] is a deferred terminal action (like --list), so
     # `--explain X --json` and `--explain --json X` both work. The slug is the
     # next non-flag token; --json (below) toggles structured output.
@@ -1402,7 +1502,8 @@ while [[ $# -gt 0 ]]; do
     --down) down_running; exit 0 ;;
     --no-wait) WAIT=0 ;;
     --force) FORCE=1 ;;
-    --owui) OWUI_REGISTER=1 ;;
+    --owui) OWUI_REGISTER=1 ;;          # back-compat: now the default
+    --no-owui) OWUI_REGISTER=0 ;;       # skip OWUI sync entirely
     --*) echo "Unknown flag: $1"; exit 1 ;;
     *)
       if [[ -n "$VARIANT" ]]; then
@@ -1458,10 +1559,20 @@ resolve_ready_url "${VARIANT}"
 down_running
 up_variant "${VARIANT}"
 [[ $WAIT -eq 1 ]] && wait_ready
-# --owui: optionally surface the just-launched endpoint in Open WebUI's model
-# picker (no-op if OWUI isn't running). Only meaningful once the server is ready.
+# OWUI sync (default on; --no-owui to skip): surface the just-launched endpoint in
+# Open WebUI's model picker AND prune club-owned connections that are no longer
+# serving, so the picker matches reality. No-op if OWUI isn't running. Only
+# meaningful once the server is ready — a not-yet-listening port would be pruned
+# by its own liveness probe.
 if [[ "$OWUI_REGISTER" -eq 1 && "$WAIT" -eq 1 ]]; then
   _owui_port="${READY_URL##*:}"; _owui_port="${_owui_port%%/*}"
   bash "$(dirname "$0")/lib/owui-register.sh" "$_owui_port" || true
+fi
+# Gateway sync: the LiteLLM route set follows what is serving, same contract as
+# the OWUI picker above. Independent of OWUI — API clients (aider/opencode/
+# agents) and the AI Studio path reach models through :4000, not the picker.
+# Never fails a launch: the model is already up and serving by this point.
+if [[ "$WAIT" -eq 1 ]]; then
+  bash "$(dirname "$0")/lib/litellm-sync.sh" --quiet || true
 fi
 echo "[switch] done. Try:  curl -s ${READY_URL%/v1/models}/v1/models | jq ."

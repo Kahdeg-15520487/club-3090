@@ -72,6 +72,12 @@ def _hardware_id_from_gpu(name: str, mem_mib: int, sm: float) -> str:
         ("5090", "rtx-5090"),
         ("rtx a5000", "rtx-a5000"),
         ("a5000", "rtx-a5000"),
+        # #1364: the rtx-a6000 profile (48 GB, sm_8.6) existed with three
+        # envelopes.yml rows but NO alias, and the sm_8.6 fallback below returned
+        # rtx-3090 for anything >=24 GB -- so the detector could never produce the
+        # id and those rows could never fire.
+        ("rtx a6000", "rtx-a6000"),
+        ("a6000", "rtx-a6000"),
         ("rtx 3060", "rtx-3060-12gb"),
         ("3060", "rtx-3060-12gb"),
         ("a100", "a100-40gb"),
@@ -96,12 +102,27 @@ def _hardware_id_from_gpu(name: str, mem_mib: int, sm: float) -> str:
         return "h100-80gb"
     if sm >= 8.9 and vram_gb >= 24:
         return "rtx-4090"
+    # #1364: sm_8.6 splits by VRAM, largest-first. This branch used to return
+    # rtx-3090 for ANY >=24 GB Ampere, i.e. a 48 GB card resolved to the 24 GB
+    # profile -- a VRAM-keyed envelope table sitting on a detector that discarded
+    # VRAM above the floor, which is exactly the "same arch, more VRAM" case
+    # #1360 hit.
+    if 8.55 <= sm <= 8.65 and vram_gb >= 44:
+        return "rtx-a6000"
     if 8.55 <= sm <= 8.65 and vram_gb >= 24:
         return "rtx-3090"
     if 7.9 <= sm <= 8.1 and vram_gb >= 40:
         return "a100-40gb"
     if 8.55 <= sm <= 8.65 and 11 <= vram_gb <= 13:
         return "rtx-3060-12gb"
+    # ⚠️ DELIBERATE UNDER-PROMISE, not an oversight. Cards with no exact profile
+    # fall to the largest SMALLER profile in their SM family:
+    #     RTX 6000 Ada / L40S (48 GB, sm_8.9) -> rtx-4090 (24 GB)
+    #     A100-80GB           (80 GB, sm_8.0) -> a100-40gb
+    # That is conservative in the safe direction -- an envelope row sized for the
+    # smaller card fits the bigger one; the reverse would not. It costs headroom,
+    # never stability. Add a profile (and rows) to claim it; do NOT widen a
+    # fallback to a LARGER profile than the card actually has.
     raise LaunchCompatError(
         f"could not map GPU `{name}` ({vram_gb} GB, sm_{sm:g}) to a hardware profile"
     )
@@ -227,12 +248,47 @@ def _load_envelopes() -> dict:
         return {}
 
 
-def _envelope_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
-    """Phase 2 concurrency injection. Empty dict = no injection (compose
-    ${MAX_NUM_SEQS:-default} stands)."""
+# #1361: the concurrency knob has a different SPELLING per engine. The quantity
+# is the same -- "how many sequences may run at once" -- but injecting vLLM's
+# name into an SGLang compose is a silent no-op: the compose reads
+# ${MAX_RUNNING_REQUESTS:-N} and never sees MAX_NUM_SEQS, so the row would look
+# applied and do nothing.
+#
+# Keyed by EngineProfile.TYPE, not by engine id. The dialect is a property of the
+# engine family, so `type` already carries it: 11 vllm ids collapse to one entry
+# and a new vllm-* profile needs no Python edit. An engine family absent from
+# this map gets NO injection rather than a guessed name -- a wrong key is worse
+# than the compose default, because the default is at least a measured value.
+# llama.cpp and exllamav3 are absent deliberately: their composes expose no
+# concurrency cap at all (UBATCH_SIZE / KV_TYPE / THREADS / MOE_SPLIT instead).
+_ENGINE_TYPE_CONCURRENCY_ENV = {
+    "vllm": "MAX_NUM_SEQS",
+    "sglang": "MAX_RUNNING_REQUESTS",
+}
+
+
+def _concurrency_env_key(profiles, entry: dict | None) -> str | None:
+    """Env var this entry's engine family reads for its concurrency cap, or None
+    when the family has no such knob (-> no injection)."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        engine = profiles.engines[entry.get("engine")]
+    except (KeyError, AttributeError, TypeError):
+        return None
+    return _ENGINE_TYPE_CONCURRENCY_ENV.get(getattr(engine, "type", None))
+
+
+def _envelope_env(profiles, variant: str, gpu_spec: str,
+                  entry: dict | None = None) -> dict[str, str]:
+    """Phase 2 concurrency injection. Empty dict = no injection (the compose's
+    own ${<KNOB>:-default} stands)."""
     if not gpu_spec:
         return {}
-    if os.environ.get("MAX_NUM_SEQS"):
+    env_key = _concurrency_env_key(profiles, entry)
+    if not env_key:
+        return {}  # unmapped engine -> compose default, never a guessed key
+    if os.environ.get(env_key):
         return {}  # explicit user pin always wins
     row = _load_envelopes().get(variant)
     if not row:
@@ -258,7 +314,7 @@ def _envelope_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
     # only inject a validated value that actually raises the ceiling
     if not isinstance(seqs, int) or (isinstance(default, int) and seqs <= default):
         return {}
-    return {"MAX_NUM_SEQS": str(seqs)}
+    return {env_key: str(seqs)}
 
 
 def _mem_util_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
@@ -365,7 +421,7 @@ def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str,
     # Only emitted when a gpu_spec is passed (launchers do; the registry-emit
     # baselines join calls without one and sees pins only).
     exports.update(_arch_aware_env(profiles, variant, entry, gpu_spec, exports))
-    exports.update(_envelope_env(profiles, variant, gpu_spec))   # Phase 2 concurrency
+    exports.update(_envelope_env(profiles, variant, gpu_spec, entry))  # Phase 2 concurrency
     exports.update(_mem_util_env(profiles, variant, gpu_spec))   # Phase 2 mem-fraction floor
     exports.update(_deepgemm_env(profiles, variant, entry, gpu_spec))  # fp8w consumer-Blackwell fix
     exports.update(_decode_granularity_env(profiles, entry))     # #809 dLLM decode class
@@ -496,6 +552,7 @@ def _run_fits_for_entry(
         requires_nvlink=bool(entry.get("requires_nvlink", False)) if include_compose_requirements else False,
         required_engine_features=list(entry.get("required_engine_features", [])) if include_compose_requirements else [],
         required_sm=entry.get("required_sm") if include_compose_requirements else None,
+        supported_sm=entry.get("supported_sm") if include_compose_requirements else None,
         project_vram=project_vram,
     )
 

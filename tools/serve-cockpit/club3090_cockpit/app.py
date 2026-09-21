@@ -505,6 +505,25 @@ def _spec_token(drafter: str, spec_method: str = "") -> str:
         sm = (spec_method or "").strip().lower()
         if sm.startswith("ngram"):
             return "ngram"      # ngram-mod / -map-k / -simple / -cache
+        # ⚠️ The drafter-less branch must speak the SAME vocabulary as the
+        # drafter branch below, or the column renders the same speculation two
+        # different ways depending on which field carries it.  It used to
+        # `return sm.split("-")[0]`, i.e. the RAW registry token — so a slug with
+        # drafter=null + spec_method="mtp" printed lowercase "mtp" while every
+        # drafter-keyed MTP row printed "MTP".  Caught 2026-09-18 with three
+        # rows diverging (bucko-vllm/qwen3.8-flash-next-ple and both
+        # exllamav3/…-cpumoe slugs) against ~130 core rows — all of them
+        # BUILT-IN heads that need no external drafter artifact, which is
+        # exactly why they keep drafter=null and fell down this path.
+        if sm.startswith("mtp"):
+            # mtp_assistant / mtp-assistant → the gemma-style assistant head
+            return "MTP·asst" if "assistant" in sm else "MTP"
+        if "dflash2" in sm:         # must precede the generic dflash check
+            return "DFlash2"
+        if "dflash" in sm:
+            return "DFlash"
+        if "dspark" in sm:
+            return "DSpark"
         return sm.split("-")[0] if sm else ""
     if "dflash2" in dr:       # DFlash2 external block-drafter (must precede the
         return "DFlash2"          # generic dflash check — "dflash2" contains "dflash")
@@ -843,18 +862,53 @@ def profile_templates(
     return out
 
 
+# Card counts that have REAL composes, smallest first.  Scanned from the registry
+# 2026-09-08: single 34 · dual 52 · multi4 17 · multi8 9 — and NO multi3, even
+# though `_TOPO_ORDER` still lists one (that entry is vestigial: `_variant_topology`
+# would accept a multi3 path, but no compose has ever used it).  Deriving the ladder
+# from card counts rather than from `_TOPO_ORDER` keeps a topology nobody ships out
+# of the default path.
+_TOPO_BY_CARDS: tuple[tuple[int, str], ...] = (
+    (1, "single"), (2, "dual"), (4, "multi4"), (8, "multi8"),
+)
+
+
+def _topology_ladder(num_gpus: int) -> list[str]:
+    """Topologies to try for a rig with ``num_gpus`` cards, BEST FIT FIRST.
+
+    The rule is *the largest topology that fits, then degrade*.  A topology needing
+    MORE cards than the rig has cannot run at all; one needing fewer always can.  So
+    4 cards → multi4, dual, single; 8 → multi8, multi4, dual, single; 1 → single.
+
+    Counts with no exact topology take the largest that fits rather than inventing a
+    slug: **3 → dual** (there are no multi3 composes) and **5-7 → multi4**.
+
+    The DEGRADING half matters as much as the exact fit.  Before this, a ≥2-card rig
+    asked only for "dual" and, when no dual option existed, fell through to "the first
+    option" — which sorts by ``_TOPO_ORDER``, i.e. a SINGLE-card slug.  A 4-card rig
+    with no multi4 default now lands on dual, which is both launchable and closer to
+    the hardware, instead of a one-card slug chosen by sort order.
+    """
+    n = max(1, int(num_gpus or 1))
+    fits = [topo for cards, topo in _TOPO_BY_CARDS if cards <= n]
+    return list(reversed(fits)) or ["single"]
+
+
 def default_profile_template(
     options: list["ProfileOption"], num_gpus: int
 ) -> Optional[str]:
     """A12 — pick the dropdown's default value for the rig's own topology.
 
     Rule (deterministic, meaningful): prefer the registry's CANONICAL slug for
-    the rig topology — a slug literally named ``<engine>/<topo>`` (``vllm/dual``
-    for ≥2 cards, ``vllm/single`` for 1 card), preferring a ``vllm/``-prefixed
-    slug; then any literal ``<engine>/<topo>`` slug; then any slug whose
-    topology matches; finally the first option.  NEVER an arbitrary alphabetical
-    (e.g. Gemma/beellama) slug.  Topology comes from the carried-through
-    ``ProfileOption.topology`` — never re-derived from the label.
+    the rig topology — a slug literally named ``<engine>/<topo>`` (``vllm/multi4``
+    on 4 cards, ``vllm/dual`` on 2, ``vllm/single`` on 1), preferring a
+    ``vllm/``-prefixed slug; then any literal ``<engine>/<topo>`` slug; then any
+    slug whose topology matches; finally the first option.  NEVER an arbitrary
+    alphabetical (e.g. Gemma/beellama) slug.  Topology comes from the
+    carried-through ``ProfileOption.topology`` — never re-derived from the label.
+
+    The rig topology is the largest that FITS the card count, degrading when it has
+    no option — see ``_topology_ladder``.
 
     **FIX 2 status floor — a Select default MUST be launchable.** The earlier
     rule returned the FIRST vllm-single option for a 1-card rig, which (since the
@@ -868,11 +922,15 @@ def default_profile_template(
     default to an absent value)."""
     if not options:
         return None
-    want = "single" if num_gpus <= 1 else "dual"
+    # ≥4-card rigs (#David412, 2026-09-08): this asked only for "single" or "dual",
+    # so a 4- or 8-GPU rig was offered DUAL templates and the multi4/multi8 slugs it
+    # actually wanted were reachable only through the custom escape hatch.  The
+    # ladder is best-fit-first with degradation — see _topology_ladder.
+    ladder = _topology_ladder(num_gpus)
 
-    def _pick(pool: list["ProfileOption"]) -> Optional[str]:
+    def _pick(pool: list["ProfileOption"], want: str) -> Optional[str]:
         """The original topology-preference order, applied to a pre-filtered
-        option pool (functional-only, then the full set)."""
+        option pool (functional-only, then the full set) for ONE topology."""
         same_topo = [o for o in pool if o.topology == want]
         # 1. the canonical vllm slug literally named "vllm/<topo>".
         canonical_vllm = f"vllm/{want}"
@@ -896,10 +954,19 @@ def default_profile_template(
 
     # Status floor: a functional default first.  Fall back to the full set, then
     # to the first option, so the return is always a real (selectable) value.
+    #
+    # ORDER MATTERS: the whole ladder is walked over the FUNCTIONAL pool before any
+    # of it is walked over the full set.  A launchable dual slug beats an
+    # incubating multi4 one on a 4-card rig — that is the FIX 2 status floor
+    # (a Select default MUST be launchable), and degrading topology is the cheaper
+    # concession of the two.
     functional = [o for o in options if _status_is_functional(o.status)]
-    return _pick(functional) or _pick(options) or (
-        functional[0].slug if functional else options[0].slug
-    )
+    for pool in (functional, options):
+        for want in ladder:
+            hit = _pick(pool, want)
+            if hit:
+                return hit
+    return functional[0].slug if functional else options[0].slug
 
 
 def _set_select_options(
@@ -4638,6 +4705,68 @@ class OperateOrchPane(Container):
         except Exception:
             pass
 
+    @staticmethod
+    def _gpu_slot_count(gpus) -> int:
+        """How many card widgets a GPU snapshot needs.
+
+        Driven by the HIGHEST index present, not by ``len(gpus)``: with a gap in the
+        indices (card 1 fell off the bus, 0 and 2 remain) the slot count must still
+        cover index 2, so the surviving cards keep their real GPU numbers instead of
+        sliding down a slot.  Floors at 1 so an EMPTY read still has a card 0 for the
+        "nvidia-smi returned nothing" message to live on.
+        """
+        idxs = [
+            int(getattr(g, "index", -1)) for g in (gpus or [])
+            if isinstance(getattr(g, "index", None), int)
+        ]
+        return max(1, (max(idxs) + 1) if idxs else 0, len(gpus or []))
+
+    def _sync_gpu_cards(self, want: int) -> None:
+        """Mount/remove GPU cards so exactly ``want`` slots exist.
+
+        The panel used to compose exactly two cards, so a 4-GPU rig read all four and
+        rendered two — reported from the field as "c3 only detects 2 GPU of 4 while
+        nvtop detects everyone" (2026-09-08).  Detection was never the problem; these
+        widgets were.
+
+        Idempotent, and converges in BOTH directions so a count that changes between
+        polls (a card dropping off the bus, or appearing) does not leave stale cards.
+        Newly mounted cards carry the same "querying nvidia-smi…" placeholder they
+        would have had at startup and are filled by the caller on this same pass when
+        Textual has already processed the mount, otherwise on the next poll tick —
+        never left blank.
+        """
+        try:
+            scroll = self.query_one("#orch-scroll")
+        except Exception:
+            return
+        have = len(self.query(".gpu-card"))
+        want = max(1, int(want))
+        if want == have:
+            return
+        if want > have:
+            cards = [
+                Container(
+                    Label(f"GPU{i}", classes="gpu-card-title"),
+                    Static("[dim]querying nvidia-smi…[/dim]", id=f"gpu{i}-bar"),
+                    classes="gpu-card",
+                    id=f"gpu{i}-card",
+                )
+                for i in range(have, want)
+            ]
+            try:
+                # Anchored BEFORE #serving-line: the cards belong at the top of the
+                # pane, and a bare mount() would append them under the scene table.
+                scroll.mount_all(cards, before=scroll.query_one("#serving-line"))
+            except Exception:
+                pass
+            return
+        for i in range(want, have):
+            try:
+                self.query_one(f"#gpu{i}-card").remove()
+            except Exception:
+                pass
+
     def _populate_gpus(self, state: EstateState) -> None:
         # N2: when nvidia-smi returned NOTHING at all (no cards in the snapshot),
         # say so honestly on the first card rather than a calm "not present" per
@@ -4645,8 +4774,17 @@ class OperateOrchPane(Container):
         # GPU-less rig.  A per-index gap (one card present, the other not) still
         # uses the calm "not present".
         no_gpus_at_all = not state.gpus
-        for i, bar_id, title_id in ((0, "#gpu0-bar", "#gpu0-card"), (1, "#gpu1-bar", "#gpu1-card")):
-            bar = self.query_one(bar_id, Static)
+        slots = self._gpu_slot_count(state.gpus)
+        self._sync_gpu_cards(slots)
+        for i in range(slots):
+            bar_id = f"#gpu{i}-bar"
+            # A card mounted THIS pass may not be in the DOM yet (mount is async);
+            # it keeps its startup placeholder and fills on the next tick rather
+            # than raising and aborting the cards that ARE present.
+            try:
+                bar = self.query_one(bar_id, Static)
+            except Exception:
+                continue
             gpu = next((g for g in state.gpus if getattr(g, "index", -1) == i), None)
             if gpu is None:
                 if no_gpus_at_all and i == 0:
@@ -6290,6 +6428,150 @@ class SettingsScreen(ModalScreen):
 
     def action_cancel(self) -> None:
         self.app.pop_screen()
+
+
+class LocalLayerScreen(ModalScreen):
+    """[L] Manage the LOCAL layer (#1153) — list, rename, edit, remove.
+
+    ⑤ Promote owned the WRITE half and nothing owned the rest: the layer was
+    write-only from the UI, so changing an entry meant hand-editing
+    registry.local.json — the exact friction the layer exists to remove.
+
+    Reads ``local_entries()``, NOT ``get_registry()``. The lookup view lets core
+    win a collision, so a SHADOWED row is absent from it by design — and that is
+    precisely the row a user needs to act on (registered, but unreachable by slug
+    until renamed). A management view that hides it would omit the one entry that
+    cannot be fixed any other way.
+
+    Per the modal rule this screen never mutates: it hands an intent back to the
+    caller, which routes it through ConfirmActionScreen like every other repo
+    write. The executor is scripts/catalog.sh, so the UI inherits the CLI's
+    refusals rather than re-implementing them — a curated slug is unreachable
+    from here for the same reason it is from the shell.
+    """
+
+    BINDINGS = [
+        Binding("r", "remove", "Remove", show=True),
+        Binding("n", "rename", "Rename", show=True),
+        Binding("e", "edit", "Edit field", show=True),
+        Binding("escape", "cancel", "Close", show=True),
+    ]
+
+    def __init__(self, entries: list, *, on_amend=None, **kwargs):
+        super().__init__(**kwargs)
+        self._entries = list(entries or [])
+        self._on_amend = on_amend
+        self._pending = ""          # "" | "rename" | "edit"
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Local layer — models you registered", classes="settings-title")
+            table: DataTable = DataTable(id="local-table")
+            table.cursor_type = "row"
+            yield table
+            inp = Input(placeholder="", id="local-input")
+            inp.display = False          # revealed only for rename / edit
+            yield inp
+            yield Label("", id="local-hint")
+            yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#local-table", DataTable)
+        table.add_columns("slug", "engine", "port", "max_ctx", "status", "")
+        self._refill()
+        self._set_hint()
+
+    def _refill(self) -> None:
+        table = self.query_one("#local-table", DataTable)
+        table.clear()
+        for e in self._entries:
+            # A shadowed row is registered but unreachable by slug: say so here,
+            # because nothing else in the UI can.
+            flag = "[yellow]shadowed[/yellow]" if e.get("shadowed") else ""
+            table.add_row(
+                str(e.get("slug") or ""),
+                str(e.get("engine") or ""),
+                str(e.get("port") or ""),
+                str(e.get("max_ctx") or ""),
+                str(e.get("status") or ""),
+                flag,
+                key=str(e.get("slug") or ""),
+            )
+
+    def _set_hint(self, msg: str = "") -> None:
+        if msg:
+            text = msg
+        elif not self._entries:
+            text = ("[dim]nothing registered yet — ⑤ Promote writes here, or "
+                    "`catalog.sh register --compose <path>`[/dim]")
+        else:
+            text = ("[dim]r remove · n rename · e edit field · esc close   "
+                    "(every action is confirm-gated; core is never touched)[/dim]")
+        try:
+            self.query_one("#local-hint", Label).update(text)
+        except Exception:
+            pass
+
+    def _selected(self):
+        if not self._entries:
+            return None
+        try:
+            i = int(self.query_one("#local-table", DataTable).cursor_row or 0)
+        except Exception:
+            i = 0
+        return self._entries[max(0, min(i, len(self._entries) - 1))]
+
+    def _prompt(self, kind: str, placeholder: str) -> None:
+        row = self._selected()
+        if row is None:
+            return
+        self._pending = kind
+        inp = self.query_one("#local-input", Input)
+        inp.placeholder = placeholder
+        inp.value = ""
+        inp.display = True
+        inp.focus()
+        self._set_hint(f"[dim]{kind} {row['slug']} — ⏎ to confirm, esc to cancel[/dim]")
+
+    def action_remove(self) -> None:
+        row = self._selected()
+        if row is not None:
+            self._emit("remove", row["slug"])
+
+    def action_rename(self) -> None:
+        self._prompt("rename", "new <engine>/<name>")
+
+    def action_edit(self) -> None:
+        self._prompt("edit", "KEY=VALUE  (workload, max_ctx, default_port, …)")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        row = self._selected()
+        val = (event.value or "").strip()
+        if row is None or not val:
+            return
+        if self._pending == "rename":
+            self._emit("rename", row["slug"], to=val)
+        elif self._pending == "edit":
+            self._emit("update", row["slug"], sets=[val])
+
+    def _emit(self, kind: str, slug: str, **kw) -> None:
+        """Hand the intent back; the caller confirms and runs it (modal rule)."""
+        self.app.pop_screen()
+        if self._on_amend is not None:
+            self._on_amend(kind, slug, kw)
+
+    def action_cancel(self) -> None:
+        # esc backs out of a prompt first, then closes the screen — otherwise a
+        # mistyped rename would need the whole screen reopened.
+        if self._pending:
+            self._pending = ""
+            inp = self.query_one("#local-input", Input)
+            inp.value = ""
+            inp.display = False
+            self.query_one("#local-table", DataTable).focus()
+            self._set_hint()
+            return
+        self.dismiss(None)
 
 
 class CatalogColumnsScreen(ModalScreen):
@@ -8809,6 +9091,11 @@ class RailStatus(Static):
         def _dev_row(d: dict) -> None:
             title = f"VRAM split · {self._vram_view}"
             lines.append(f"[bold]{title}[/bold]")
+            if d.get("used") is not None and d.get("total"):
+                pct = int(d["used"] / d["total"] * 100)
+                lines.append(
+                    f"  used     {_human_gb(int(d['used']) * 1024 * 1024)} / "
+                    f"{_human_gb(int(d['total']) * 1024 * 1024)} ({pct}%)")
             for label in ("model", "pool", "compute", "kv", "state"):
                 v = d.get(label)
                 if v is not None:
@@ -8824,14 +9111,20 @@ class RailStatus(Static):
 
         if self._vram_view == "estate":
             agg: dict[str, float] = {}
+            used = total = 0
             for d in devices:
                 for k in ("model", "pool", "compute", "kv", "state"):
                     if d.get(k) is not None:
                         agg[k] = agg.get(k, 0.0) + d[k]
+                if d.get("used") is not None and d.get("total"):
+                    used += int(d["used"])
+                    total += int(d["total"])
             other = sum(max(0, d.get("unaccounted") or 0) for d in devices)
             agg_row = dict(agg)
             agg_row["device"] = "estate"
             agg_row["unaccounted"] = other
+            agg_row["used"] = used
+            agg_row["total"] = total
             _dev_row(agg_row)
         else:
             d = next((x for x in devices if x.get("device") == self._vram_view), None)
@@ -8840,7 +9133,10 @@ class RailStatus(Static):
         if clamped:
             lines.append("[dim]  ⚠ components exceed the live total — split is from a staler boot log[/dim]")
         if vram.get("warnings"):
-            lines.append(f"[dim]  ⚠ {vram['warnings'][0][:60]}[/dim]")
+            # Full text -- Textual wraps to the rail width; a 60-char slice
+            # chopped the moe-cache warning mid-sentence.
+            for w in vram.get("warnings", []):
+                lines.append(f"[dim]  ⚠ {w}[/dim]")
         return lines
 
     def _render_card(self) -> None:
@@ -9536,6 +9832,14 @@ class CockpitApp(App):
         #   [O] Optimize for my card (kv-calc brain; apply = gated stage)
         Binding("v", "evaluate_target", "Evaluate via c3t", show=False),
         Binding("P", "promote_catalog", "Scaffold preview", show=False),
+        # [ctrl+l] — manage what you registered (#1153). ⑤ Promote owns the write
+        # half; this is the rest of it.
+        # ⚠️ NOT a bare "L". `l` is already bound at app level (container_logs),
+        # and adding the uppercase twin HANGS the headless suite — verified by
+        # bisection: "L" hangs test_force_button_reissues_forced_plan, "Z" and
+        # "ctrl+l" pass. Only `a` and `j` are free in both cases app-wide, and
+        # neither reads as "local layer".
+        Binding("ctrl+l", "local_layer", "Local layer", show=True),
         # R3b-1 — producer lane ② Serve: generate a compose + serve it untested
         # (also reachable via ⏎ on the ② Serve stage).
         Binding("g", "serve_untested", "Serve untested", show=False),
@@ -9876,6 +10180,12 @@ class CockpitApp(App):
         4. Sub-tab cycle keys — True only in modes that have sub-tabs.
         5. Everything else — True (pass-through; modals handle their own capture).
         """
+        # [ctrl+l] is advertised only when the local layer has something in it —
+        # a footer entry that opens an empty table is noise on every rig that has
+        # never registered a model.
+        if action == "local_layer":
+            return self._has_local_entries()
+
         from textual.widgets import Input as _Input
 
         # Surface gate (R3a): producer-only actions are hidden on the consumer
@@ -12352,6 +12662,24 @@ class CockpitApp(App):
         }
         if plan.kind in _SYNC_REPOLL_KINDS:
             self.load_estate()
+        # A registry WRITE changes what the CATALOG lists, and nothing re-read
+        # it — so after ⑤ Promote registered a slug, or the local-layer view
+        # removed/renamed one, the table kept showing the OLD registry until the
+        # user pressed [r] themselves (reported on the first real use of the
+        # #1153 remove).  The estate re-poll above is the wrong instrument: the
+        # rig didn't change, the registry did.  Re-read it on the same
+        # successful-write path (a REFUSED write returned above and never
+        # reaches here).  load_catalog is @work(exclusive, group="catalog"), so
+        # this coalesces with any in-flight load rather than racing it, and it
+        # no-ops safely when the pane isn't mounted.
+        _REGISTRY_REPOLL_KINDS = {
+            "promote_catalog",   # ⑤ registers a NEW local entry
+            "local_remove",      # #1153 local-layer management
+            "local_rename",
+            "local_update",
+        }
+        if plan.kind in _REGISTRY_REPOLL_KINDS:
+            self.load_catalog()
         if plan.kind == "serve":
             if live is not None:
                 # Reveal the transient Run boot pane (Fold 2).  Do NOT print the
@@ -15579,6 +15907,45 @@ class CockpitApp(App):
                 ),
             )
         )
+
+    def _has_local_entries(self) -> bool:
+        """Is there anything in the local layer to manage?
+
+        Drives whether [ctrl+l] is advertised in the footer. A user who has
+        registered a model looks for the remove action ON THE ROW and does not
+        find it — the affordance existed but only behind a hidden key, which is
+        barely shipping it. Showing the binding exactly when it does something is
+        the cheap half of that fix."""
+        try:
+            from scripts.lib.profiles.compose_registry import local_entries
+
+            return bool(local_entries())
+        except Exception:
+            return False
+
+    def action_local_layer(self) -> None:
+        """[L] — list the LOCAL layer and act on it (#1153)."""
+        try:
+            from scripts.lib.profiles.compose_registry import local_entries
+
+            entries = local_entries()
+        except Exception:
+            entries = []
+        self.push_screen(
+            LocalLayerScreen(entries, on_amend=self._stage_local_amend)
+        )
+
+    def _stage_local_amend(self, kind: str, slug: str, kw: dict) -> None:
+        """Route a local-layer amendment through the SAME confirm gate as every
+        other repo write. The screen only expresses intent; nothing mutates until
+        the user confirms, and the executor (catalog.sh) re-asserts every refusal
+        independently — a curated slug is unreachable from here regardless."""
+        try:
+            plan = self._data.local_amend_plan(kind, slug, **(kw or {}))
+        except ValueError as exc:
+            self.notify(str(exc), title="Local layer", severity="warning", timeout=5)
+            return
+        self.push_screen(ConfirmActionScreen(plan))
 
     def _stage_promote_write(self, scaffold, layer: str, spec: dict) -> None:
         """Gate the ⑤ write on having a compose to register (#1156).

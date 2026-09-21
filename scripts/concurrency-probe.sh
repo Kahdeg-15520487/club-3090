@@ -202,14 +202,24 @@ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}
 _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
 _served_np()     { _container_cmd | command grep -oE '\-np +[0-9]+'         | command grep -oE '[0-9]+' | head -1; }
 _served_ctx()    { _container_cmd | command grep -oE 'max-model-len [0-9]+' | command grep -oE '[0-9]+' | head -1; }
+# SGLang names the same knob --max-running-requests. Without this the detector fell
+# through vLLM's --max-num-seqs, llama.cpp's -np and /props (none of which SGLang has)
+# and hit the #818 FATAL — so concurrency-probe could not run against ANY sgl/ slug.
+_served_max_running() { _container_cmd | command grep -oE 'max-running-requests [0-9]+' | command grep -oE '[0-9]+' | head -1; }
 # llama.cpp-family servers report the slot count as total_slots on /props.
 _props_slots()   { curl -s -m 3 "${URL}/props" 2>/dev/null \
   | python3 -c 'import json,sys; v=json.load(sys.stdin).get("total_slots",""); print(v if isinstance(v,int) else "")' 2>/dev/null; }
+# SGLang exposes it on /get_server_info (flat, top-level). Used when the compose set
+# it via env rather than a literal flag in the container cmd.
+_sgl_max_running() { curl -s -m 3 "${URL}/get_server_info" 2>/dev/null \
+  | python3 -c 'import json,sys; v=json.load(sys.stdin).get("max_running_requests",""); print(v if isinstance(v,int) else "")' 2>/dev/null; }
 
 _detect_slots() {
   local n
   n="$(_served_seqs || true)"; [[ -n "$n" ]] && { echo "$n"; return; }
   n="$(_served_np || true)";   [[ -n "$n" ]] && { echo "$n"; return; }
+  n="$(_served_max_running || true)"; [[ -n "$n" ]] && { echo "$n"; return; }
+  n="$(_sgl_max_running || true)";    [[ -n "$n" ]] && { echo "$n"; return; }
   n="$(_props_slots || true)"; [[ -n "$n" ]] && { echo "$n"; return; }
   echo ""
 }
@@ -305,7 +315,9 @@ if [[ -n "$SWEEP" || "$MATRIX" == "1" ]]; then
 elif [[ -z "${CONCURRENCY:-}" ]]; then
   _conc_src="container max-num-seqs"; CONCURRENCY="$(_served_seqs || true)"
   if [[ -z "$CONCURRENCY" ]]; then _conc_src="container -np";          CONCURRENCY="$(_served_np || true)"; fi
+  if [[ -z "$CONCURRENCY" ]]; then _conc_src="container max-running-requests"; CONCURRENCY="$(_served_max_running || true)"; fi
   if [[ -z "$CONCURRENCY" ]]; then _conc_src="server /props total_slots"; CONCURRENCY="$(_props_slots || true)"; fi
+  if [[ -z "$CONCURRENCY" ]]; then _conc_src="server /get_server_info max_running_requests"; CONCURRENCY="$(_sgl_max_running || true)"; fi
   if [[ -z "$CONCURRENCY" ]]; then
     echo "[concurrency-probe] FATAL: cannot detect the served slot count" \
          "(container cmd and ${URL}/props both failed) — pass CONCURRENCY=N explicitly" >&2
@@ -524,10 +536,17 @@ PY
     fail=0
     clean="$(sed -n 's/.* clean=\([0-9]*\).*/\1/p' <<<"$line")"
     running="$(sed -n 's/.* running=\([^ ]*\).*/\1/p' <<<"$line")"
+    running_max="$(sed -n 's/.* running_max=\([^ ]*\).*/\1/p' <<<"$line")"
+    waiting_max="$(sed -n 's/.* waiting_max=\([^ ]*\).*/\1/p' <<<"$line")"
     [[ "$rc" != "0" || "$clean" != "1" ]] && fail=1
-    if [[ "$running" =~ ^[0-9]+$ && "$running" -lt "$n" ]]; then
+    # Key off the PEAK, not the racy last sample. A rung where every request
+    # completed but whose final metrics sample happened to land after they
+    # finished reads running=0 and used to fail the rung AND early-stop the
+    # ladder — silently truncating the very measurement the sweep exists to
+    # produce. (From @voiceagentscc's #1212.)
+    if [[ "$running_max" =~ ^[0-9]+$ && "$running_max" -lt "$n" ]]; then
       fail=1
-      echo "[sweep] admitted ${running}/${n} — treating as fail for early-stop"
+      echo "[sweep] admitted peak ${running_max}/${n} (waiting ${waiting_max:-?}) — treating as fail for early-stop"
     fi
     if [[ "$fail" == "1" && "$EARLY_STOP" == "1" ]]; then
       ROW_DEAD[$ctx]="$n"
@@ -607,7 +626,19 @@ if [[ -n "$SWEEP" ]]; then
   # (experimental/incubating) — switch.sh refuses it without --force, AFTER tearing
   # the old container down. Restore-on-exit trap returns the slug to its default
   # config if a probe dies mid-sweep. (Same fix as spec-sweep, 2026-08-20.)
-  trap 'rm -f "${cells_jsonl:-}"; bash "$ROOT_DIR/scripts/switch.sh" --force "$SLUG" >/dev/null 2>&1 || true' EXIT
+  #
+  # ⚠️ The restore trap MUST NOT be installed on a dry run. It fires at process
+  # exit — i.e. AFTER the last [sweep:dry] line is printed — so a stdout assertion
+  # of "no boot happened" passes while the trap boots the slug for real. That is
+  # exactly how SWEEP_DRY=1 left a live vllm/minimal behind on this rig
+  # (2026-09-08): the guard suite ran the dry case, went green, and booted a 20 GB
+  # model. A dry run must touch nothing. spec-sweep.sh avoids this by exiting
+  # before its traps; this branch handles dry inside the loop, so it guards here.
+  if [[ "$SWEEP_DRY" == "1" ]]; then
+    trap 'rm -f "${cells_jsonl:-}"' EXIT
+  else
+    trap 'rm -f "${cells_jsonl:-}"; bash "$ROOT_DIR/scripts/switch.sh" --force "$SLUG" >/dev/null 2>&1 || true' EXIT
+  fi
   for N in $SWEEP; do
     if [[ "$SWEEP_DRY" == "1" ]]; then
       echo "[sweep:dry] would: MAX_NUM_SEQS=$N switch.sh $SLUG  ->  wait ready  ->  probe N=$N"
@@ -657,8 +688,15 @@ if [[ -n "$SWEEP" ]]; then
   else
     echo "  no N met the bar — lower the sweep range or the target_ctx, or check the floor."
   fi
-  echo "[sweep] restoring $SLUG default boot config…"
-  bash "$ROOT_DIR/scripts/switch.sh" --force "$SLUG" >/dev/null 2>&1 || true
+  # ⚠️ Restore only if we actually changed anything. On SWEEP_DRY the loop above
+  # `continue`s without booting, so there is nothing to restore — and calling
+  # switch.sh here would boot the slug for real at the end of a run whose entire
+  # contract is "print the plan, touch nothing". This is the line that left a live
+  # vllm/minimal on the rig (2026-09-08); the exit trap above was the second one.
+  if [[ "$SWEEP_DRY" != "1" ]]; then
+    echo "[sweep] restoring $SLUG default boot config…"
+    bash "$ROOT_DIR/scripts/switch.sh" --force "$SLUG" >/dev/null 2>&1 || true
+  fi
   trap - EXIT
   _cp_emit "$knee" "$knee_tps" "$knee_agg"
   exit 0

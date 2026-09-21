@@ -113,7 +113,7 @@ fi
 assert_contains "$out" "install.spec is not a docker image"
 
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell)"
-assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.27.1"
+assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.29.0"
 
 
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/gemma-int8-mtp --format shell)"
@@ -147,7 +147,7 @@ out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell 
 assert_not_contains "$out" "KV_CACHE_DTYPE"
 # unmapped card -> degrade to compose defaults, never an error
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "0|Weird GPU|8192|7.0")"
-assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.27.1"
+assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.29.0"
 assert_not_contains "$out" "KV_CACHE_DTYPE"
 echo "  ok: #246 arch-aware KV injection matrix (8 cases)"
 
@@ -163,13 +163,23 @@ cases = [
     ("NVIDIA GB10",                  131072, 12.1, "dgx-spark"),
     ("NVIDIA GeForce RTX 5090",       32607, 12.0, "rtx-5090"),
     ("NVIDIA RTX 6000 Ada Generation",49140,  8.9, "rtx-4090"),                # 'pro 6000' must NOT catch Ada
+    # #1364: the sm_8.6 bucket returned rtx-3090 for ANY >=24 GB Ampere, so a
+    # 48 GB A6000 resolved to the 24 GB profile and the three rtx-a6000 envelope
+    # rows could never fire. Lock the split by NAME and by VRAM fallback.
+    ("NVIDIA RTX A6000",              49140,  8.6, "rtx-a6000"),
+    ("Unnamed Ampere 48GB",           49140,  8.6, "rtx-a6000"),
+    ("NVIDIA GeForce RTX 3090",       24576,  8.6, "rtx-3090"),
+    ("NVIDIA RTX A5000",              24564,  8.6, "rtx-a5000"),
+    # Deliberate under-promise: no exact profile, so fall to the largest SMALLER
+    # same-family profile. Safe direction; the reverse would not be.
+    ("NVIDIA A100-SXM4-80GB",         81920,  8.0, "a100-40gb"),
 ]
 bad = [f"{n}->{m(n,v,s)} want {e}" for n, v, s, e in cases if m(n, v, s) != e]
 print("FAIL: " + " | ".join(bad) if bad else "OK")
 PY
 )"
 [[ "$det" == "OK" ]] || { echo "  FAIL: detector: $det"; exit 1; }
-echo "  ok: Blackwell detector split (PRO 6000 / GB10 / 5090 / Ada — 5 cases)"
+echo "  ok: hardware detector split (PRO 6000 / GB10 / 5090 / Ada / A6000 / A5000 / 3090 / A100-80)"
 
 # --- #246 Phase 2 mem-fraction floor (DOWNWARD only) --------------------------
 # A unified-memory card (Spark, mem_util_safe 0.85) can't safely give the 0.92
@@ -214,7 +224,7 @@ echo "  ok: fp8/NVFP4 DeepGEMM disable (5090/Ada down · Hopper keep · non-fp8 
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml" config 2>/dev/null)"
-  assert_contains "$out" "image: vllm/vllm-openai:v0.27.1"
+  assert_contains "$out" "image: vllm/vllm-openai:v0.29.0"
 
   out="$(VLLM_NIGHTLY_SHA="$CLEAN_SHA" VLLM_IMAGE=vllm/vllm-openai:latest docker compose -f "$ROOT_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml" config 2>/dev/null)"
   assert_contains "$out" "image: vllm/vllm-openai:latest"
@@ -230,7 +240,7 @@ print(clean["VLLM_IMAGE"])
 print(gemma["VLLM_IMAGE"])
 PY
 )"
-assert_contains "$out" "vllm/vllm-openai:v0.27.1"   # clean (vllm/dual → vllm-stable) bumped to v0.27.1
+assert_contains "$out" "vllm/vllm-openai:v0.29.0"   # clean (vllm/dual → vllm-stable) bumped to v0.29.0
 assert_contains "$out" "vllm/vllm-openai:v0.22.0"   # gemma (vllm/gemma-int8-mtp → vllm-gemma-stable) stays v0.22.0
 
 # --- #809: decode_granularity travels from the profile YAML to the launchers --

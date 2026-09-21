@@ -92,7 +92,7 @@
 
 services:
   llama-cpp-deepseek-flash:
-    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b10236}
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:6ac921528d613deb0fd142c654735e594a446a1c37a069eeab08d8fd974d4bec}
     container_name: "${ESTATE_CONTAINER:-llama-cpp-deepseek-flash-q8-multi4}"
     restart: unless-stopped
     ports:
@@ -144,7 +144,7 @@ services:
         # model when one is named -- so the memory stays spent. Removing the
         # flags is the only clean off. A non-numeric SPEC_N is a hard error, so a
         # typo can never masquerade as a silent "drafter off".
-        _spec_n="$${SPEC_N:-1}"
+        _spec_n="$${SPEC_N:-5}"
         case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
         case "$$_spec_n" in ""|*[!0-9]*)
           echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
