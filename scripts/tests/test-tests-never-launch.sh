@@ -26,6 +26,7 @@
 # behaviour is to boot. `switch.sh` / `launch.sh` are policed for a neutralizer.
 # Read-only sub-commands are not launches and are listed as such.
 set -euo pipefail
+export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 export PYTHONUTF8="${PYTHONUTF8:-1}"
@@ -46,12 +47,21 @@ NEUTRALIZERS = (
                           # helper, which prints "ARGS …" and exits — not assumed
                           # from the variable's name.
     "DRY_RUN=1", "--dry-run",
+    'PATH="$T/bin:',      # test-gpu-mode-service-upgrade: `docker` and `sudo` are
+                          # fixture-driven shims in $T/bin, prepended INLINE on each
+                          # gpu-mode call. VERIFIED, not assumed: that test refuses
+                          # to run unless `command -v docker/sudo` under that PATH
+                          # resolves to the shims, and it asserts on the shims' call
+                          # log, so a real docker would fail it rather than launch.
 )
 # Read-only sub-commands — these never reach `compose up`.
 READONLY = (
     "--list", "--explain", "--defaults", "--set-default", "--clear-default",
     "--validate-estate", "--topology", "--check", "--json", "--help",
     "--version", "--down", "--print", "--emit",
+    "service-images",     # gpu-mode: show_service_images → service_image_rows runs only
+                          # `docker compose config` + `docker ps/inspect`, and prints.
+                          # VERIFIED against gpu-mode.sh, not assumed from the name.
 )
 LAUNCHERS = re.compile(r"\b(spec-sweep|switch|launch|gpu-mode)\.sh\b")
 # Execution, not mention: `bash <path>/<launcher>.sh` anywhere in the command.

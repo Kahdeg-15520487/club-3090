@@ -5,7 +5,7 @@
 #              per 128, stored in a blockwise Hadamard-rotated basis folded in
 #              offline. Architecture UNCHANGED from Qwen3.8-27B; the GGUF
 #              declares `general.architecture = qwen35`, 64 blocks, 851 tensors.
-#   Engine:    llama.cpp PrismML ternary fork, SOURCE-BUILT b10709 + 3 PRs
+#   Engine:    llama.cpp PrismML ternary fork, SOURCE-BUILT prism-b10735-842b188 + 1 open PR (#189); #205/#216 now upstream
 #              ⚠️ NOT upstream's binary — see engines/llama-cpp-prism-mtp.yml
 #   Topology:  Single 3090 — the whole 27B fits one card with room to spare.
 #              No offload, no expert cache, no split tuning.
@@ -102,7 +102,7 @@ services:
     # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
     # The engine profile (engines/llama-cpp-prism.yml) is authoritative.
     # Image = upstream's linux-cuda-12.8 release tarball + libgomp1, nothing else.
-    image: ${LLAMACPP_PRISM_MTP_IMAGE:-ghcr.io/noonghunna/llamacpp-prism-mtp@sha256:7f859a6050b32895b2a177590545febad5008b4529db40335fab4765a8b37f48}
+    image: ${LLAMACPP_PRISM_MTP_IMAGE:-ghcr.io/noonghunna/llamacpp-prism-mtp@sha256:cd299c55f9dd8e12bbd609733208b4eb07b96905b43fa226a2c8c145282a3ca4}
     container_name: "${ESTATE_CONTAINER:-llama-cpp-prism-qwen38-27b-ternary-mtp}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     # Reap orphaned children — a wedged server otherwise becomes a <defunct>
@@ -117,7 +117,7 @@ services:
       # the cause was found (2026-09-18), and a first fix to 8163/8164 was STILL
       # inside the span. ⚠️ Eight sgl/qwen38-27b-multi* slugs remain on 8147-8154
       # and have the same latent problem — pre-existing, tracked separately.
-      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8182}}:8080"
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8183}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     environment:
@@ -180,15 +180,18 @@ services:
         # llama.cpp's last-wins is DEPRECATED upstream and warns.
         if [ -n "$${INSTRUCT:-}" ]; then
           _r="$${REASONING:-off}"; _t="$${TEMP:-$${TEMPERATURE:-0.7}}"
-          _p="$${TOP_P:-0.80}";    _pp="$${PRESENCE_PENALTY:-1.5}"
-          echo "[sampler] INSTRUCT row: reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp" >&2
+          _p="$${TOP_P:-0.80}";    _pp="$${PRESENCE_PENALTY:-1.5}"; _mp="$${MIN_P:-0.0}"
+          echo "[sampler] INSTRUCT row: reasoning=$$_r temp=$$_t top_p=$$_p min_p=$$_mp presence=$$_pp" >&2
         else
           _r="$${REASONING:-on}";  _t="$${TEMP:-$${TEMPERATURE:-1.0}}"
-          _p="$${TOP_P:-0.95}";    _pp="$${PRESENCE_PENALTY:-0.0}"
-          echo "[sampler] THINKING row (default): reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp" >&2
+          # min_p 0.05 on the THINKING row: the Bonsai 2 card and PrismML's own start_llama_server.sh both
+          # pass it ("scored at least as well as 0.0 and followed instructions more reliably"). The base
+          # Qwen3.8-27B card says 0.0, which is why the vLLM/SGLang composes keep 0.0. MIN_P= still wins.
+          _p="$${TOP_P:-0.95}";    _pp="$${PRESENCE_PENALTY:-0.0}"; _mp="$${MIN_P:-0.05}"
+          echo "[sampler] THINKING row (default): reasoning=$$_r temp=$$_t top_p=$$_p min_p=$$_mp presence=$$_pp" >&2
         fi
         ROW=(--reasoning "$$_r" --temp "$$_t" --top-p "$$_p" --presence-penalty "$$_pp"
-             --top-k "$${TOP_K:-20}" --min-p "$${MIN_P:-0.0}")
+             --top-k "$${TOP_K:-20}" --min-p "$$_mp")
         # -- Reasoning knobs: all six --reasoning-* flags reachable ------------------
         # ⭐ BUDGET DEFAULTS TO 8192 HERE (maintainer call 2026-09-19), unlike the
         # llama-cpp siblings which keep llama.cpp's own -1. Semantics confirmed from

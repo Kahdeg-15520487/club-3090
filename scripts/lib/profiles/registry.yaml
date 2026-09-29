@@ -34,6 +34,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 32768
@@ -64,6 +65,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -94,6 +96,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -124,6 +127,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -154,6 +158,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -184,6 +189,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -214,6 +220,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 4
     max_ctx: 262144
@@ -244,6 +251,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 4
     max_ctx: 262144
@@ -274,6 +282,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 65536
@@ -306,11 +315,12 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
     max_num_seqs: 2
-    mem_util: 0.92
+    mem_util: 0.85
     compose_path: models/qwen3.6-27b/vllm/compose/dual/nvfp4/mtp.yml
     requires_nvlink: false
     requires_homogeneous_arch: true
@@ -338,6 +348,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 200000
@@ -368,6 +379,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 200000
@@ -398,6 +410,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 200000
@@ -428,6 +441,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 150000
@@ -459,6 +473,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 200000
@@ -489,6 +504,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 163840
@@ -520,6 +536,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 200000
@@ -550,6 +567,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 102400
@@ -583,6 +601,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 163840
@@ -613,6 +632,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 163840
@@ -643,6 +663,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -673,6 +694,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 200000
@@ -703,6 +725,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 122880
@@ -733,6 +756,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 180000
@@ -763,6 +787,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 200000
@@ -793,6 +818,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 196608
@@ -823,6 +849,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -854,6 +881,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 163840
@@ -884,6 +912,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -914,6 +943,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 196608
@@ -944,6 +974,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 196608
@@ -974,6 +1005,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 196608
@@ -1004,6 +1036,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -1034,6 +1067,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 1
     max_ctx: 8192
@@ -1065,6 +1099,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 131072
@@ -1095,6 +1130,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 262144
@@ -1126,6 +1162,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 229376
@@ -1157,6 +1194,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 4
     max_ctx: 262144
@@ -1187,6 +1225,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 262144
@@ -1218,6 +1257,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 262144
@@ -1248,6 +1288,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 1
     max_ctx: 262144
@@ -1278,11 +1319,12 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 1
     max_ctx: 262144
     max_num_seqs: 4
-    mem_util: 0.94
+    mem_util: 0.92
     compose_path: models/gemma-4-12b/vllm/compose/single/qat-w4a16/mtp.yml
     requires_nvlink: false
     requires_homogeneous_arch: false
@@ -1308,6 +1350,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -1338,6 +1381,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -1368,6 +1412,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 128000
@@ -1401,6 +1446,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -1432,6 +1478,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 131072
@@ -1463,6 +1510,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 131072
@@ -1493,6 +1541,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 65536
@@ -1523,6 +1572,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 131072
@@ -1553,6 +1603,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 65536
@@ -1583,6 +1634,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -1614,6 +1666,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 196608
@@ -1645,6 +1698,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 1
     max_ctx: 176000
@@ -1675,6 +1729,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 262144
@@ -1705,6 +1760,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: gemma-canonical
     tp: 2
     max_ctx: 262144
@@ -1735,6 +1791,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 8192
@@ -1765,6 +1822,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -1795,6 +1853,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 1
     max_ctx: 131072
@@ -1827,6 +1886,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -1859,6 +1919,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -1891,6 +1952,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -1921,6 +1983,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -1951,6 +2014,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 131072
@@ -1982,6 +2046,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 121
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -2014,6 +2079,7 @@ entries:
     offload: residency
     moe_cache: true
     host_ram_gb: 99
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -2046,6 +2112,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 121
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 262144
@@ -2078,6 +2145,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 142
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2112,6 +2180,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 142
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2146,6 +2215,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 142
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2180,6 +2250,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2214,6 +2285,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2248,6 +2320,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2282,6 +2355,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2316,6 +2390,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2350,6 +2425,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2384,6 +2460,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 145
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2418,6 +2495,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 145
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2452,6 +2530,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 145
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2486,6 +2565,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2520,6 +2600,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2554,6 +2635,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2588,6 +2670,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 145
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2622,6 +2705,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 145
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2656,6 +2740,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 145
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2690,6 +2775,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2739,6 +2825,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2788,6 +2875,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 110
+    kv_offload: null
     chat_template: native
     tp: 8
     max_ctx: 204800
@@ -2837,6 +2925,7 @@ entries:
     offload: cpu-moe-split
     moe_cache: false
     host_ram_gb: 96
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2869,6 +2958,7 @@ entries:
     offload: cpu-moe-split
     moe_cache: false
     host_ram_gb: 118
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2901,6 +2991,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 156
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2934,6 +3025,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 156
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -2966,6 +3058,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 156
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -2998,6 +3091,7 @@ entries:
     offload: tensor-override
     moe_cache: true
     host_ram_gb: 156
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -3031,6 +3125,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 146
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -3064,6 +3159,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 86
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 204800
@@ -3097,6 +3193,7 @@ entries:
     offload: residency
     moe_cache: false
     host_ram_gb: 120
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 204800
@@ -3130,6 +3227,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -3160,6 +3258,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 131072
@@ -3192,6 +3291,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: froggeric
     tp: 2
     max_ctx: 262144
@@ -3223,6 +3323,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -3254,6 +3355,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 4
     max_ctx: 200000
@@ -3286,6 +3388,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -3304,6 +3407,54 @@ entries:
     serve_aliases: []
     required_sm: 7.5
     fallback_sm: 7.5
+  llamacpp/mimo9b-single-vision:
+    origin: core
+    model: mimo-v2.6-9b
+    weights_variant: bartowski-q8
+    workload: fast-chat
+    engine: llama-cpp-local
+    drafter: null
+    spec_method: null
+    kv_format: q8_0
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: native
+    tp: 1
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/mimo-v2.6-9b/llama-cpp/compose/single/bartowski-q8/full-vision.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8094
+    kvcalc_key: SKIP
+    status: caveats
+    status_note: "MiMo-V2.6-Distill-Qwen-9B (Xiaomi) on MAINLINE llama.cpp, single 3090: bartowski Q8_0 + q8_0 KV + -ub 4096, full 262144 ctx WITH vision, 17,426 / 24,576 MiB — GPU1 stays completely free. Arch CONFIRMED from the GGUF header (qwen35, block_count=32, full_attention_interval=4) as a Qwen3-Next DENSE-FFN HYBRID: 8 full-attn + 24 GDN layers, base_model Qwen3.5-9B. Only 8/32 layers grow KV, measured at LLAMA_ARG_LOG_VERBOSITY=4: 4,352 MiB at q8_0 (16 KiB/tok) vs 8,192 MiB at f16 (32 KiB/tok); q8_0 also pays +768 MiB compute buffer for the attn_rot path, so the NET saving is 3,072 MiB, not 3,840. bench 2026-09-22 on the exact shipped argv (spec off, asserted from /proc/<pid>/cmdline): narrative 53.69 TPS (CV 1.8%), code 50.88 (CV 0.6%), prefill@10K 2,359.7 (CV 0.3%), prefill@90K 1,809.5, decode@10K-depth 48.2, @90K-depth 32.6, TTFT 52 ms. -ub 4096 is a MEASURED PEAK: 8192 is worse on both prefill shapes for no VRAM saving. NO MTP head in the GGUF -> drafter-free ngram only, and ngram MEASURED UNFAVOURABLE (narrative 53.74 -> 50.80); SPEC_TYPE=<type> opts back in. Thinking ON by default (adaptive) with a per-request chat_template_kwargs toggle; INSTRUCT=1 switches the whole sampler row. verify-full: 7 pass / 2 N-A / 1 KNOWN-FLAKY ([7/10] asserted reasoning on a trivial prompt — a harness bug, fixed 2026-09-26 (verify-full now asks a multi-step question and passes short-but-present reasoning; 0 fails on re-check)). Vision 4/4 on ground truth. PROMOTED 2026-09-23 to caveats: verify-stress ceiling ladder 6/6 to 240,785 tok (91%), 6,629 MiB free and flat; soak-continuous PASS (25/25, 0 MiB growth); 8-pack thinking ON 79/150 p@1, 94/150 p@3. Caveats: tool calls need the vendored chat template until the pin passes ggml-org/llama.cpp#29257; with no tools offered it answers in tool-call XML instead of a requested <solution> block (cli-40 one-shot 0/25); verify-full [7/10] was a harness false-fail, fixed 2026-09-26 (verify-full now asks a multi-step question and passes short-but-present reasoning; 0 fails on re-check)."
+    weights_companions:
+      - bartowski-mmproj-f16
+    gateway: true
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 0.6
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
   ik-llama/ornith9b-single:
     origin: core
     model: ornith-1.0-9b
@@ -3318,6 +3469,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -3348,6 +3500,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -3378,6 +3531,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 131072
@@ -3408,6 +3562,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 131072
@@ -3438,6 +3593,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -3485,6 +3641,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -3516,7 +3673,7 @@ entries:
         temperature: 1.0
         top_p: 0.95
         top_k: 20
-        min_p: 0.0
+        min_p: 0.05
         presence_penalty: 0.0
         repetition_penalty: 1.0
     sampler_default_mode: thinking
@@ -3534,6 +3691,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 1
     max_ctx: 262144
@@ -3565,7 +3723,7 @@ entries:
         temperature: 1.0
         top_p: 0.95
         top_k: 20
-        min_p: 0.0
+        min_p: 0.05
         presence_penalty: 0.0
         repetition_penalty: 1.0
     sampler_default_mode: thinking
@@ -3583,6 +3741,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: native
     tp: 2
     max_ctx: 262144
@@ -3629,6 +3788,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: opt-in
     chat_template: null
     tp: 2
     max_ctx: 163840
@@ -3641,7 +3801,7 @@ entries:
     default_port: 8145
     kvcalc_key: SKIP
     status: experimental
-    status_note: "Qwen3.8-27B FIDELITY tier on stock SGLang v0.5.19 (zero patches), dual 3090 TP=2, OFFICIAL Qwen/Qwen3.8-27B-FP8 block-quantised e4m3 weights, native in-checkpoint MTP head, KV fp8_e4m3. ⭐ MEASURED ON THE REFERENCE RIG 2026-09-10: verify-full ALL PASS (8 scored; Genesis N/A and the MTP-acceptance check SKIPPED — it greps for vLLM's SpecDecoding metrics line, which SGLang never emits, so read the engine's own accept len: counter instead), bench 67.33 narrative / 75.58 code decode TPS (code median 76.56 — run 5 returned 465 tok; this model self-terminates under the canonical prompt, so set FORCE_TOKENS before differencing any decode number), prefill 1120.80 @10K / 906.70 @90K, MTP accept len 2.92 (n=147), vision 4/4. ⚠️⚠️ max_ctx IS 163840, NOT THE 262144 ARCHITECTURAL CEILING, AND THAT IS MEASURED NOT ASSUMED: at TP=2 the fp8 weights take 14.75 GB/rank and the MTP head another 2.67, committing ~18.3 GB before KV. mem_util 0.86 yields a 92,507-token pool; 0.92 yields 157,875 and is the practical ceiling for mem_util (above it the prefill cudagraph capture OOMs, surfacing as a PyTorch num_active_captures_ assert rather than a clean CUDA OOM). ⭐⭐ K PINNED AT 10 SINCE 2026-09-15: mem_util was already at its ceiling, so the mamba pool was the only remaining lever. Auto-fit gives K=21 and spends the surplus slots on breadth this single-stream slug does not use. MEASURED: K=21 -> 158,116 tokens; K=10 -> 182,901 (+24,785), avail mem unchanged (1.67 -> 1.66 GB). That delta is EXACTLY 11 x 2,253.2, the same KV-tokens-per-mamba-slot exchange rate measured on the int4 tier - it is quant-INDEPENDENT (per-slot SSM bytes and per-token KV bytes are identical across tiers; only the budget differs). ctx therefore raised 131072 -> 163840, leaving 19,061 tokens of radix headroom (1.116x). GATED at that pair: verify-full 10/10 (vision 4/4, MTP acceptance 3.446), 0 OOM, 0 capture asserts, peak VRAM 22,809/22,502 MiB. ⚠️ COST: usable warm-prefix slots = K - 3 x max_running_requests, so 18 -> 7. Depth is unaffected; BREADTH shrinks. Raise MAX_MAMBA_CACHE_SIZE back toward 21 and lower CONTEXT_LENGTH if you keep many distinct conversations warm. ⚠️ 180224 would fit arithmetically at ~1.01x and is deliberately NOT chosen - this tier has the slowest prefill on the rig, so zero radix headroom means every miss is repaid at full price. A full 262,144 context needs ~4.02 GB/rank of KV at ~15.3 KB/token and there is nowhere near that much left, so 131072 is what the pool covers with ~27K tokens of radix headroom. ⚠️ On Ampere this tier is DELIBERATELY SLOWER than the int4 series — sm_86 has no native FP8 compute so weights serve weight-only through Marlin with activations upcast (sglang auto-enables it: fp8_utils.py::can_auto_enable_marlin_fp8 -> 80 <= sm < 89; the checkpoint is BLOCK-quantised, weight_block_size [128,128], and Marlin handles that explicitly at fp8.py:960-962 — check those lines first if a future pin breaks loading). ON A >=Ada/Hopper HOST THE FP8 PATH IS NATIVE AND THIS CAVEAT DOES NOT APPLY. ⭐ WHY IT SHIPS DESPITE BEING SLOWER AND SHORTER (maintainer decision 2026-09-10, taken with these numbers in hand): (1) it is the ONLY sglang tier on OFFICIAL Qwen weights — every other sgl/ slug is community AutoRound INT4 — which makes it the on-rig QUALITY REFERENCE for A/Bs against the int4 tiers, a role independent of throughput; (2) it is the MEASURED on-rig proxy for the four never-bootable sgl/qwen38-27b-multi{4,8}-{max,supermax} slugs, which cite these numbers. ⚠️ For raw throughput at 2x24GB use sgl/qwen38-27b-dual-fast or -dual-superfast (int4): 89.24/112.50 and 115.08/171.16 decode at 409,552 / 279,595 pool. ⚠ dual-fast re-defaulted 2026-09-15 (#1329) to 0.95 / max-running-requests 2: pool now 451,633, and decode measured LOWER at the new default (74.00/101.58) - an unexplained, unconfirmed drop, so treat both dual-fast decode figures as provisional. No soak, no 8-pack, no BENCHMARKS row yet. Detail: learnings/sglang-engine.md 2026-09-10."
+    status_note: "Qwen3.8-27B FIDELITY tier on stock SGLang v0.5.19 (zero patches), dual 3090 TP=2, OFFICIAL Qwen/Qwen3.8-27B-FP8 block-quantised e4m3 weights, native in-checkpoint MTP head, KV fp8_e4m3. ⭐ MEASURED ON THE REFERENCE RIG 2026-09-10: verify-full ALL PASS (8 scored; Genesis N/A and the MTP-acceptance check SKIPPED — it greps for vLLM's SpecDecoding metrics line, which SGLang never emits, so read the engine's own accept len: counter instead), bench 67.33 narrative / 75.58 code decode TPS (code median 76.56 — run 5 returned 465 tok; this model self-terminates under the canonical prompt, so set FORCE_TOKENS before differencing any decode number), prefill 1120.80 @10K / 906.70 @90K, MTP accept len 2.92 (n=147), vision 4/4. ⚠️⚠️ max_ctx IS 163840, NOT THE 262144 ARCHITECTURAL CEILING, AND THAT IS MEASURED NOT ASSUMED: at TP=2 the fp8 weights take 14.75 GB/rank and the MTP head another 2.67, committing ~18.3 GB before KV. mem_util 0.86 yields a 92,507-token pool; 0.92 yields 157,875 and is the practical ceiling for mem_util (above it the prefill cudagraph capture OOMs, surfacing as a PyTorch num_active_captures_ assert rather than a clean CUDA OOM). ⭐⭐ K PINNED AT 10 SINCE 2026-09-15: mem_util was already at its ceiling, so the mamba pool was the only remaining lever. Auto-fit gives K=21 and spends the surplus slots on breadth this single-stream slug does not use. MEASURED: K=21 -> 158,116 tokens; K=10 -> 182,901 (+24,785), avail mem unchanged (1.67 -> 1.66 GB). That delta is EXACTLY 11 x 2,253.2, the same KV-tokens-per-mamba-slot exchange rate measured on the int4 tier - it is quant-INDEPENDENT (per-slot SSM bytes and per-token KV bytes are identical across tiers; only the budget differs). ctx therefore raised 131072 -> 163840, leaving 19,061 tokens of radix headroom (1.116x). GATED at that pair: verify-full 10/10 (vision 4/4, MTP acceptance 3.446), 0 OOM, 0 capture asserts, peak VRAM 22,809/22,502 MiB. ⚠️ COST: usable warm-prefix slots = K - 3 x max_running_requests, so 18 -> 7. Depth is unaffected; BREADTH shrinks. Raise MAX_MAMBA_CACHE_SIZE back toward 21 and lower CONTEXT_LENGTH if you keep many distinct conversations warm. ⚠️ 180224 would fit arithmetically at ~1.01x and is deliberately NOT chosen - this tier has the slowest prefill on the rig, so zero radix headroom means every miss is repaid at full price. A full 262,144 context needs ~4.02 GB/rank of KV at ~15.3 KB/token and there is nowhere near that much left, so 131072 is what the pool covers with ~27K tokens of radix headroom. ⚠️ On Ampere this tier is DELIBERATELY SLOWER than the int4 series — sm_86 has no native FP8 compute so weights serve weight-only through Marlin with activations upcast (sglang auto-enables it: fp8_utils.py::can_auto_enable_marlin_fp8 -> 80 <= sm < 89; the checkpoint is BLOCK-quantised, weight_block_size [128,128], and Marlin handles that explicitly at fp8.py:960-962 — check those lines first if a future pin breaks loading). ON A >=Ada/Hopper HOST THE FP8 PATH IS NATIVE AND THIS CAVEAT DOES NOT APPLY. ⭐ WHY IT SHIPS DESPITE BEING SLOWER AND SHORTER (maintainer decision 2026-09-10, taken with these numbers in hand): (1) it is the ONLY sglang tier on OFFICIAL Qwen weights — every other sgl/ slug is community AutoRound INT4 — which makes it the on-rig QUALITY REFERENCE for A/Bs against the int4 tiers, a role independent of throughput; (2) it is the MEASURED on-rig proxy for the four never-bootable sgl/qwen38-27b-multi{4,8}-{max,supermax} slugs, which cite these numbers. ⚠️ For raw throughput at 2x24GB use sgl/qwen38-27b-dual-fast or -dual-superfast (int4): 89.24/112.50 and 115.08/171.16 decode at 409,552 / 279,595 pool. ⚠ dual-fast re-defaulted 2026-09-15 (#1329) to 0.95 / max-running-requests 2: pool now 451,633, and decode measured LOWER at the new default (74.00/101.58) - an unexplained, unconfirmed drop, so treat both dual-fast decode figures as provisional. No soak, no 8-pack, no BENCHMARKS row yet. Detail: learnings/sglang-engine.md 2026-09-10. ⭐ Opt-in host-RAM prefix tier (2026-09-25): KV_OFFLOAD_GB -> SGLang HiCache with --mamba-max-states-per-path 1 (+ slru); optional disk tier KV_OFFLOAD_DISK / KV_OFFLOAD_DIR / KV_OFFLOAD_DISK_GB. Off by default."
     weights_companions: []
     gateway: false
     serve_aliases: []
@@ -3659,10 +3819,11 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 4
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.86
     compose_path: models/qwen3.8-27b/sglang/compose/multi4/fp8/mtp.yml
     requires_nvlink: false
@@ -3689,10 +3850,11 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 8
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.86
     compose_path: models/qwen3.8-27b/sglang/compose/multi8/fp8/mtp.yml
     requires_nvlink: false
@@ -3719,10 +3881,11 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 4
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.84
     compose_path: models/qwen3.8-27b/sglang/compose/multi4/fp8/dflash2.yml
     requires_nvlink: false
@@ -3749,10 +3912,11 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 8
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.84
     compose_path: models/qwen3.8-27b/sglang/compose/multi8/fp8/dflash2.yml
     requires_nvlink: false
@@ -3774,16 +3938,17 @@ entries:
     drafter: qwen-mtp-builtin
     spec_method: null
     kv_format: fp8_e4m3
-    act_format: 16bit
+    act_format: int8
     act8_capable: false
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: opt-in
     chat_template: null
     tp: 2
     max_ctx: 262144
-    max_num_seqs: 1
-    mem_util: 0.9
+    max_num_seqs: 2
+    mem_util: 0.95
     compose_path: models/qwen3.8-27b/sglang/compose/dual/autoround-int4/mtp.yml
     requires_nvlink: false
     requires_homogeneous_arch: false
@@ -3791,7 +3956,7 @@ entries:
     default_port: 8142
     kvcalc_key: SKIP
     status: experimental
-    status_note: "Qwen3.8-27B on STOCK SGLang v0.5.19 (zero patches), dual 3090 TP=2, Frozenlock AutoRound INT4, native in-checkpoint MTP head n=4, KV fp8_e4m3, flashinfer full attention, 262144. ⭐ DEFAULTS CHANGED 2026-09-15: mem-fraction-static 0.90 -> 0.95 and max-running-requests 1 -> 2, so this tier now serves TWO concurrent sessions rather than one. MEASURED at the new default: KV pool 451,633 tokens = 2 x 225,817 (86% of the 262,144 ceiling), max_mamba_cache_size 63 auto-fit (clamp allows C=12), MTP accept len 3.25 / rate 0.56 (ABOVE the 2.86 below, which was taken at the old 1-session default), 1.47 GB post-boot headroom, 0 OOM. ⚠️ max-mamba-cache-size stays UNSET (auto-fit): forcing K down buys context and COSTS acceptance (K=35 -> 3.02, K=10 -> 2.27), and a full 2 x 262,144 would need K <= ~30. ⭐ GATED 2026-09-15 at the new default (club-3090#1329): verify-full 10/10, verify-stress boundary 5/5 + ceiling ladder 6/6 to 240,660 tok (91% of n_ctx), soak-continuous PASS (0/200 MiB growth, 0 errors, 100% retention), quality cli-40 29/40 (a NEW baseline - no prior same-engine cli-40 run exists for this compose), bench (⚠️ measured THIRD in the gate chain, see below) narrative 74.00 / code 101.58. ⭐⭐ RE-BENCHED 2026-09-15 ON A DEDICATED FRESH BOOT, no FORCE_TOKENS: narrative 101.26 / code 135.63 (CV 3.9%/2.1%, n-usable 5/5), prefill 1224.74 @10K (CV 0.9%) / 986.37 @90K, accept len 3.142, TTFT 86/87 ms. ⇒ THE NEW DEFAULT IS FASTER THAN THE OLD ONE: +13.5% narrative, +20.6% code over the 2026-09-10 89.24/112.50, on top of +10.3% pool. ⛔ THE EARLIER '-17.1% REGRESSION' IS RETRACTED - it was a harness artifact, not the config. ⚠️⚠️ BENCH ON A DEDICATED BOOT: running bench third in a gate chain (after verify-stress drives a 240K ceiling ladder) under-reports narrative -27%, code -25%, prefill -8%. Not the drafter - accept len is identical (3.139 chained vs 3.142 fresh) - and prefill has no drafter component. Residual pool occupancy ruled out (full token usage 0.00-0.19 during the chained bench). ⚠️ FORCE_TOKENS is NOT the fix and must not be used to bench a spec-dec tier: it sets ignore_eos, the repetitive tail saturates the MTP drafter (accept len hits 5.000, the SPEC_N=4 ceiling; run mean 3.508) while throughput moves ~1%.  Detail: learnings/qwen3.8-27b.md + learnings/sglang-engine.md 2026-09-15. ⭐ MEASURED ON THE REFERENCE RIG 2026-09-10: verify-full ALL PASS (8 scored; Genesis N/A and the MTP-acceptance check SKIPPED — see the caveat below), bench narrative 89.24 / code 112.50 decode TPS (n=5 each, CV 3.2%/4.3%), prefill 1183.41 @10K (CV 0.1%) / 952.92 @90K, MTP accept len 2.86 / rate 0.465 over n=131, KV pool 409,552 tokens, vision 4/4 on ground truth. ⭐ `--mamba-ssm-dtype bfloat16` is set deliberately: it does NOT free VRAM (the mamba pool is auto-fit, so halving the SSM dtype buys ~2x the slots — 26 to 55 — at 0.24 GB LESS total) but it returned the intermediate cache to KV. ⭐ ESTABLISHED 2026-09-11 by A,B,A,B repeat-boot with FORCE_TOKENS=800: code decode +8.0% (111.92 -> 120.82; every bf16 boot beat every fp32 boot), narrative a null (-2.7%, arms overlap). ⛔ The earlier single-boot '+2.5% prefill' is RETRACTED and FLIPS SIGN — bf16 is ~1.3% SLOWER on prefill, measured at within-arm spread 0.5%/1.7%. Independent check: the same fp32 config drifted 1154.28 -> 1208.77 prefill@10K day-to-day (~4.7%), larger than the delta that single boot claimed. bf16 stays default on the memory effect (2x mamba slots at 0.24 GB less) plus code decode, NOT on prefill. ⚠️⚠️ DO NOT COMPARE THESE NUMBERS TO vllm/qwen38-27b-dual-fast AND CALL THE DELTA AN ENGINE DIFFERENCE: that tier ships W4A8 (int8 activations via our vendored Marlin negscale fold) and stock SGLang has NO W4A8 path for a dense auto-round 4-bit checkpoint (auto-round declares get_supported_act_dtypes -> [half, bfloat16]; w4afp8 is fp8-activations and min_capability 90; the w4a8 modelslim/quark schemes are MoE-only). Like-for-like against vLLM W4A16 (1219.51 prefill@10K) this is roughly -3%, not the -33% a naive W4A8-vs-W4A16 comparison suggests. A W4A8 patch for SGLang exists and is worth ~+47% prefill: jb-seo's original (club-3090#1178, cut against v0.5.18) and @A1RM4X's v0.5.19 re-cut WITH a shape guard (club-3090#1226) — take the latter, jb-seo's gate omits the per-shard K%128==0/N%64==0 constraint that prepare_w4a8 hard-asserts and crashes on the GDN merged in_proj_ba tensor. NOT applied here either way — this slug is deliberately the zero-patch reference. ⚠️ `--chunked-prefill-size` stays 2048: 4096 was tested and REGRESSED prefill at both depths (-1.6% @10K, -1.0% @90K) while tripling decode variance. ⛔ `--linear-attn-backend` is NOT a lever on sm_86 — for a GDN model every alternative to Triton either hard-errors (helion/intel_xpu, KDA-only backends) or falls back to Triton for prefill by construction (cutedsl needs SM100+, flashinfer GDN is SM90+). ⚠️⚠️ THE ACCEPTANCE CHECK IS BLIND ON THIS ENGINE: verify-full step 9 greps for vLLM's `SpecDecoding metrics` log line, which SGLang does not emit, so it SKIPS — and because speculative decoding rejects bad drafts, a 0%-acceptance drafter is slow but never wrong and every output-shaped check still passes. Read the engine's own `accept len:` decode-batch counter; a green verify-full says nothing about drafter health (this exact blind spot hid a dead drafter on the superfast sibling for a full bench cycle). 8-pack still pending (cli-40 only); BENCHMARKS row added 2026-09-15. Detail: learnings/sglang-engine.md 2026-09-10."
+    status_note: "Qwen3.8-27B on STOCK SGLang v0.5.19 (zero patches), dual 3090 TP=2, Frozenlock AutoRound INT4, native in-checkpoint MTP head n=4, KV fp8_e4m3, flashinfer full attention, 262144. ⭐ DEFAULTS CHANGED 2026-09-15: mem-fraction-static 0.90 -> 0.95 and max-running-requests 1 -> 2, so this tier now serves TWO concurrent sessions rather than one. MEASURED at the new default: KV pool 451,633 tokens = 2 x 225,817 (86% of the 262,144 ceiling), max_mamba_cache_size 63 auto-fit (clamp allows C=12), MTP accept len 3.25 / rate 0.56 (ABOVE the 2.86 below, which was taken at the old 1-session default), 1.47 GB post-boot headroom, 0 OOM. ⭐ K=20 DEFAULT 2026-09-25 (MAX_MAMBA_CACHE_SIZE, was auto-fit K=63; =auto restores it): pool 451,633 -> 548,520 tokens, which holds TWO full 262,144-token sessions (measured: two concurrent ~261.9K prompts, both needles recalled, 0 errors); MTP accept len 3.12, decode and prefill flat, 1.48 GB headroom. The old claim that a full 2 x 262,144 needs K <= ~30 at an acceptance cost was extrapolated from K=10 (2.27, zero drafter slack at c2); K=15 and K=20 measure flat. ⭐ GATED 2026-09-15 at the new default (club-3090#1329): verify-full 10/10, verify-stress boundary 5/5 + ceiling ladder 6/6 to 240,660 tok (91% of n_ctx), soak-continuous PASS (0/200 MiB growth, 0 errors, 100% retention), quality cli-40 29/40 (a NEW baseline - no prior same-engine cli-40 run exists for this compose), bench (⚠️ measured THIRD in the gate chain, see below) narrative 74.00 / code 101.58. ⭐⭐ RE-BENCHED 2026-09-15 ON A DEDICATED FRESH BOOT, no FORCE_TOKENS: narrative 101.26 / code 135.63 (CV 3.9%/2.1%, n-usable 5/5), prefill 1224.74 @10K (CV 0.9%) / 986.37 @90K, accept len 3.142, TTFT 86/87 ms. ⇒ THE NEW DEFAULT IS FASTER THAN THE OLD ONE: +13.5% narrative, +20.6% code over the 2026-09-10 89.24/112.50, on top of +10.3% pool. ⛔ THE EARLIER '-17.1% REGRESSION' IS RETRACTED - it was a harness artifact, not the config. ⚠️⚠️ BENCH ON A DEDICATED BOOT: running bench third in a gate chain (after verify-stress drives a 240K ceiling ladder) under-reports narrative -27%, code -25%, prefill -8%. Not the drafter - accept len is identical (3.139 chained vs 3.142 fresh) - and prefill has no drafter component. Residual pool occupancy ruled out (full token usage 0.00-0.19 during the chained bench). ⚠️ FORCE_TOKENS is NOT the fix and must not be used to bench a spec-dec tier: it sets ignore_eos, the repetitive tail saturates the MTP drafter (accept len hits 5.000, the SPEC_N=4 ceiling; run mean 3.508) while throughput moves ~1%.  Detail: learnings/qwen3.8-27b.md + learnings/sglang-engine.md 2026-09-15. ⭐ MEASURED ON THE REFERENCE RIG 2026-09-10: verify-full ALL PASS (8 scored; Genesis N/A and the MTP-acceptance check SKIPPED — see the caveat below), bench narrative 89.24 / code 112.50 decode TPS (n=5 each, CV 3.2%/4.3%), prefill 1183.41 @10K (CV 0.1%) / 952.92 @90K, MTP accept len 2.86 / rate 0.465 over n=131, KV pool 409,552 tokens, vision 4/4 on ground truth. ⭐ `--mamba-ssm-dtype bfloat16` is set deliberately: it does NOT free VRAM (the mamba pool is auto-fit, so halving the SSM dtype buys ~2x the slots — 26 to 55 — at 0.24 GB LESS total) but it returned the intermediate cache to KV. ⭐ ESTABLISHED 2026-09-11 by A,B,A,B repeat-boot with FORCE_TOKENS=800: code decode +8.0% (111.92 -> 120.82; every bf16 boot beat every fp32 boot), narrative a null (-2.7%, arms overlap). ⛔ The earlier single-boot '+2.5% prefill' is RETRACTED and FLIPS SIGN — bf16 is ~1.3% SLOWER on prefill, measured at within-arm spread 0.5%/1.7%. Independent check: the same fp32 config drifted 1154.28 -> 1208.77 prefill@10K day-to-day (~4.7%), larger than the delta that single boot claimed. bf16 stays default on the memory effect (2x mamba slots at 0.24 GB less) plus code decode, NOT on prefill. ⚠️⚠️ DO NOT COMPARE THESE NUMBERS TO vllm/qwen38-27b-dual-fast AND CALL THE DELTA AN ENGINE DIFFERENCE: that tier ships W4A8 (int8 activations via our vendored Marlin negscale fold) and stock SGLang has NO W4A8 path for a dense auto-round 4-bit checkpoint (auto-round declares get_supported_act_dtypes -> [half, bfloat16]; w4afp8 is fp8-activations and min_capability 90; the w4a8 modelslim/quark schemes are MoE-only). Like-for-like against vLLM W4A16 (1219.51 prefill@10K) this is roughly -3%, not the -33% a naive W4A8-vs-W4A16 comparison suggests. A W4A8 patch for SGLang exists and is worth ~+47% prefill: jb-seo's original (club-3090#1178, cut against v0.5.18) and @A1RM4X's v0.5.19 re-cut WITH a shape guard (club-3090#1226) — take the latter, jb-seo's gate omits the per-shard K%128==0/N%64==0 constraint that prepare_w4a8 hard-asserts and crashes on the GDN merged in_proj_ba tensor. NOT applied here either way — this slug is deliberately the zero-patch reference. ⚠️ `--chunked-prefill-size` stays 2048: 4096 was tested and REGRESSED prefill at both depths (-1.6% @10K, -1.0% @90K) while tripling decode variance. ⛔ `--linear-attn-backend` is NOT a lever on sm_86 — for a GDN model every alternative to Triton either hard-errors (helion/intel_xpu, KDA-only backends) or falls back to Triton for prefill by construction (cutedsl needs SM100+, flashinfer GDN is SM90+). ⚠️⚠️ THE ACCEPTANCE CHECK IS BLIND ON THIS ENGINE: verify-full step 9 greps for vLLM's `SpecDecoding metrics` log line, which SGLang does not emit, so it SKIPS — and because speculative decoding rejects bad drafts, a 0%-acceptance drafter is slow but never wrong and every output-shaped check still passes. Read the engine's own `accept len:` decode-batch counter; a green verify-full says nothing about drafter health (this exact blind spot hid a dead drafter on the superfast sibling for a full bench cycle). 8-pack still pending (cli-40 only); BENCHMARKS row added 2026-09-15. Detail: learnings/sglang-engine.md 2026-09-10. ⭐ Opt-in host-RAM prefix tier (2026-09-25): KV_OFFLOAD_GB -> SGLang HiCache with --mamba-max-states-per-path 1 (+ slru); optional disk tier KV_OFFLOAD_DISK / KV_OFFLOAD_DIR / KV_OFFLOAD_DISK_GB. Off by default."
     weights_companions: []
     gateway: false
     serve_aliases: []
@@ -3804,15 +3969,16 @@ entries:
     drafter: qwen-mtp-builtin
     spec_method: null
     kv_format: fp8_e4m3
-    act_format: 16bit
+    act_format: int8
     act8_capable: false
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 4
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.9
     compose_path: models/qwen3.8-27b/sglang/compose/multi4/autoround-int4/mtp.yml
     requires_nvlink: false
@@ -3834,15 +4000,16 @@ entries:
     drafter: qwen-mtp-builtin
     spec_method: null
     kv_format: fp8_e4m3
-    act_format: 16bit
+    act_format: int8
     act8_capable: false
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 8
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.9
     compose_path: models/qwen3.8-27b/sglang/compose/multi8/autoround-int4/mtp.yml
     requires_nvlink: false
@@ -3864,11 +4031,12 @@ entries:
     drafter: zlab-qwen38-dflash2
     spec_method: null
     kv_format: fp8_e4m3
-    act_format: 16bit
+    act_format: int8
     act8_capable: false
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 2
     max_ctx: 262144
@@ -3894,15 +4062,16 @@ entries:
     drafter: zlab-qwen38-dflash2
     spec_method: null
     kv_format: fp8_e4m3
-    act_format: 16bit
+    act_format: int8
     act8_capable: false
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 4
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.82
     compose_path: models/qwen3.8-27b/sglang/compose/multi4/autoround-int4/dflash2.yml
     requires_nvlink: false
@@ -3924,15 +4093,16 @@ entries:
     drafter: zlab-qwen38-dflash2
     spec_method: null
     kv_format: fp8_e4m3
-    act_format: 16bit
+    act_format: int8
     act8_capable: false
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: null
     tp: 8
     max_ctx: 262144
-    max_num_seqs: 1
+    max_num_seqs: 2
     mem_util: 0.82
     compose_path: models/qwen3.8-27b/sglang/compose/multi8/autoround-int4/dflash2.yml
     requires_nvlink: false
@@ -3959,6 +4129,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: opt-in
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 262144
@@ -4005,6 +4176,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 4
     max_ctx: 262144
@@ -4051,6 +4223,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 8
     max_ctx: 262144
@@ -4097,6 +4270,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 147456
@@ -4143,6 +4317,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 4
     max_ctx: 262144
@@ -4189,6 +4364,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 8
     max_ctx: 262144
@@ -4235,6 +4411,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 262144
@@ -4289,6 +4466,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 4
     max_ctx: 262144
@@ -4335,6 +4513,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 8
     max_ctx: 262144
@@ -4381,6 +4560,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: opt-in
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 262144
@@ -4393,7 +4573,7 @@ entries:
     default_port: 8113
     kvcalc_key: "qwen3.8-27b:dual-fast"
     status: experimental
-    status_note: "⭐ CHECKPOINT SWAPPED Avuja → Frozenlock/Qwen3.8-27B-int4-AutoRound 2026-08-20 (club-3090#1052): the Avuja export permanently collapsed the built-in MTP drafter to 0% acceptance at ~14.5k gen; Frozenlock (SAME auto-round 4/g128/sym recipe, different export) runs clean past 22-24k in BOTH W4A8 and W4A16 — verify-full 8/9, bench narr ~74.9 / code ~103.5 TPS, MTP accept-len 3.48-5.0, coherent. Distinct from the SEPARATE vllm#50021 crash (still live). ⚠️⚠️ THE MEASURED NUMBERS BELOW (W4A16/W4A8 benches, the n=4 depth knee, verify-full 9/9) were taken on the PRIOR AVUJA export and are INHERITED — NOT re-measured on Frozenlock; re-run before quoting as Frozenlock figures. Avuja preserved on disk as qwen3.8-27b-autoround-int4-avuja. — Qwen3.8-27B FAST tier, 2-card (TP=2), MTP n=4, fp8 KV @262144. MEASURED on this checkpoint at TP=2 (2026-08-15/16, vLLM v0.25.1, 3 warm + 5 measured, one boot per arm): W4A16 no-MTP 65.87 narrative / 61.05 code / 1219.51 prefill@10K; W4A8 no-MTP 60.54 / 56.29 / 1728.92 (+41.8% prefill, -28.6% TTFT@10K, but -8% decode BOTH shapes); verify-full 9/9 on both arms; KV pool 652,346 tok @262K (2.49x). MTP depth swept under W4A8 -> knee at n=4: narrative 62.59(n=0)->76.40(n=4) +22.1%, code 57.45->105.60 +83.8%, accept length 1.94->3.90. n=1 is WORSE than no drafter (-15.9% narrative). Acceptance length rises monotonically to 4.70 at n=6 while throughput flattens, so it CANNOT be used to pick depth. No instability at n=4/5/6 (restarts=0) -- the 3.6 family's n>=4 warning did NOT reproduce. ⭐ THE SHIPPED DEFAULT IS NOW THE MEASURED PATH: int8 activations became the default 2026-08-16, and since the depth sweep ran under W4A8, W4A8 + n=4 is the combination that was actually benched (76.40 narrative / 105.60 code). ⚠️ The int8-vs-16bit delta UNDER MTP is still unmeasured -- the -8% decode figure is MTP-off and must not be quoted for this config. ⚠️⚠️ MTP n=4 IS SINGLE-STREAM ON 24 GB CARDS: at MAX_NUM_SEQS=2 with 16K prompts the drafter pushed peak VRAM to 23,872 MiB/card -- 1.75 GB OVER the 0.90 budget -- and requests failed while ~535K KV tokens sat free; SPEC_N=0 at the same concurrency runs clean. The drafter also costs ~13% of the KV pool (652,346 -> 567,737). ⚠️ That VRAM limit is REAL BUT SCOPED TO LONG CONTEXT, and it is NOT the old engine crash: the MTP-under-concurrency crash (the #40756 FlashInfer decode-plan race + the async wild-write) was closed 2026-08-23 by vllm-flashinfer-decode-pin + vllm-gdn-mtp-async-spec-order, and max_num_seqs has DEFAULTED TO 8 in the compose since, validated clean to C=32 at ~1K-tok prompts with MTP accept ~2.8. seqs=8 is validated at short/moderate context ONLY -- at 16K prompts the figure above still bites. The registry said 1 until 2026-09-11 (#1242); that was stale, not a second opinion. For concurrent serving set SPEC_N=0 and raise it: measured ceiling ~49 tok/s aggregate at 10K ctx, usable to N=8 by a 10 tok/s per-stream floor or N=4 end-to-end; beyond that the engine queues rather than serves (logged Running:9 / Waiting:55 at a rung launched with max_num_seqs=64). Community AutoRound INT4 (auto-round, 4-bit, g128, sym, 18.23 GiB) -- the FAST tier opposite the official-FP8 MAX tier; ~9.1 GiB/card at TP=2 vs FP8's ~14.4, which is where the larger KV pool comes from. W4A8 (int8 activations) IS THE SHIPPED DEFAULT since 2026-08-16 (W4A8=0 restores W4A16); the vendored patches are wired at boot -- it works only because the checkpoint is auto-round-packed [k/8,n], which is what the vendored negscale fold assumes; a compressed-tensors sibling hard-fails it. VISION untested (tower present, unquantized). MTP head is QUANTIZED on the Frozenlock export (Avuja's was bf16). ⚠️ MTP exposed to OPEN vllm#50021 -- mitigate with SPEC_N=0. Launch requires --force (experimental). Detail: learnings/qwen3.8-27b.md + BENCHMARKS.md."
+    status_note: "⭐ CHECKPOINT SWAPPED Avuja → Frozenlock/Qwen3.8-27B-int4-AutoRound 2026-08-20 (club-3090#1052): the Avuja export permanently collapsed the built-in MTP drafter to 0% acceptance at ~14.5k gen; Frozenlock (SAME auto-round 4/g128/sym recipe, different export) runs clean past 22-24k in BOTH W4A8 and W4A16 — verify-full 8/9, bench narr ~74.9 / code ~103.5 TPS, MTP accept-len 3.48-5.0, coherent. Distinct from the SEPARATE vllm#50021 crash (still live). ⚠️⚠️ THE MEASURED NUMBERS BELOW (W4A16/W4A8 benches, the n=4 depth knee, verify-full 9/9) were taken on the PRIOR AVUJA export and are INHERITED — NOT re-measured on Frozenlock; re-run before quoting as Frozenlock figures. Avuja preserved on disk as qwen3.8-27b-autoround-int4-avuja. — Qwen3.8-27B FAST tier, 2-card (TP=2), MTP n=4, fp8 KV @262144. MEASURED on this checkpoint at TP=2 (2026-08-15/16, vLLM v0.25.1, 3 warm + 5 measured, one boot per arm): W4A16 no-MTP 65.87 narrative / 61.05 code / 1219.51 prefill@10K; W4A8 no-MTP 60.54 / 56.29 / 1728.92 (+41.8% prefill, -28.6% TTFT@10K, but -8% decode BOTH shapes); verify-full 9/9 on both arms; KV pool 652,346 tok @262K (2.49x). MTP depth swept under W4A8 -> knee at n=4: narrative 62.59(n=0)->76.40(n=4) +22.1%, code 57.45->105.60 +83.8%, accept length 1.94->3.90. n=1 is WORSE than no drafter (-15.9% narrative). Acceptance length rises monotonically to 4.70 at n=6 while throughput flattens, so it CANNOT be used to pick depth. No instability at n=4/5/6 (restarts=0) -- the 3.6 family's n>=4 warning did NOT reproduce. ⭐ THE SHIPPED DEFAULT IS NOW THE MEASURED PATH: int8 activations became the default 2026-08-16, and since the depth sweep ran under W4A8, W4A8 + n=4 is the combination that was actually benched (76.40 narrative / 105.60 code). ⚠️ The int8-vs-16bit delta UNDER MTP is still unmeasured -- the -8% decode figure is MTP-off and must not be quoted for this config. ⚠️⚠️ MTP n=4 IS SINGLE-STREAM ON 24 GB CARDS: at MAX_NUM_SEQS=2 with 16K prompts the drafter pushed peak VRAM to 23,872 MiB/card -- 1.75 GB OVER the 0.90 budget -- and requests failed while ~535K KV tokens sat free; SPEC_N=0 at the same concurrency runs clean. The drafter also costs ~13% of the KV pool (652,346 -> 567,737). ⚠️ That VRAM limit is REAL BUT SCOPED TO LONG CONTEXT, and it is NOT the old engine crash: the MTP-under-concurrency crash (the #40756 FlashInfer decode-plan race + the async wild-write) was closed 2026-08-23 by vllm-flashinfer-decode-pin + our V1-runner hoist (vllm-gdn-mtp-async-spec-order, removed 2026-09-26: v0.30.0 serves MTP on the V2 runner, where it never ran; the async race is untested on V2), and max_num_seqs has DEFAULTED TO 8 in the compose since, validated clean to C=32 at ~1K-tok prompts with MTP accept ~2.8. seqs=8 is validated at short/moderate context ONLY -- at 16K prompts the figure above still bites. The registry said 1 until 2026-09-11 (#1242); that was stale, not a second opinion. For concurrent serving set SPEC_N=0 and raise it: measured ceiling ~49 tok/s aggregate at 10K ctx, usable to N=8 by a 10 tok/s per-stream floor or N=4 end-to-end; beyond that the engine queues rather than serves (logged Running:9 / Waiting:55 at a rung launched with max_num_seqs=64). Community AutoRound INT4 (auto-round, 4-bit, g128, sym, 18.23 GiB) -- the FAST tier opposite the official-FP8 MAX tier; ~9.1 GiB/card at TP=2 vs FP8's ~14.4, which is where the larger KV pool comes from. W4A8 (int8 activations) IS THE SHIPPED DEFAULT since 2026-08-16 (W4A8=0 restores W4A16); the vendored patches are wired at boot -- it works only because the checkpoint is auto-round-packed [k/8,n], which is what the vendored negscale fold assumes; a compressed-tensors sibling hard-fails it. VISION untested (tower present, unquantized). MTP head is QUANTIZED on the Frozenlock export (Avuja's was bf16). ⚠️ MTP exposed to OPEN vllm#50021 -- mitigate with SPEC_N=0. Launch requires --force (experimental). Detail: learnings/qwen3.8-27b.md + BENCHMARKS.md."
     weights_companions: []
     gateway: false
     serve_aliases: []
@@ -4427,6 +4607,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 4
     max_ctx: 262144
@@ -4473,6 +4654,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 8
     max_ctx: 262144
@@ -4519,6 +4701,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 262144
@@ -4565,6 +4748,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 4
     max_ctx: 262144
@@ -4611,6 +4795,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 8
     max_ctx: 262144
@@ -4657,6 +4842,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 262144
@@ -4710,6 +4896,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 4
     max_ctx: 262144
@@ -4756,6 +4943,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 8
     max_ctx: 262144
@@ -4802,6 +4990,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: null
     chat_template: qwen38-reasoning-effort
     tp: 1
     max_ctx: 65536
@@ -4848,6 +5037,7 @@ entries:
     offload: null
     moe_cache: false
     host_ram_gb: null
+    kv_offload: opt-in
     chat_template: qwen38-reasoning-effort
     tp: 2
     max_ctx: 262144
@@ -4861,6 +5051,1208 @@ entries:
     kvcalc_key: SKIP
     status: experimental
     status_note: "Qwen3.8-27B NVFP4, dual card (TP=2) @262144. Weights halve to ~10.2 GiB/card, which is what makes the full context reachable where the single-card config caps at 65536. RadixArk NVFP4 (modelopt MIXED: 193 module groups at W4-float/A4-float + 208 at W8-float/A8-float, ignore=2; 20.44 GiB, 22 files). ⚠️⚠️ THE 4-BIT ACTIVATIONS CANNOT EXECUTE ON AMPERE -- sm_86 has no FP4 tensor cores, so vLLM serves this weight-only via the Marlin W4A16 fallback and upcasts activations to 16-bit whatever the checkpoint declares. The 3.6 NVFP4 sibling records 'no speed edge vs AutoRound' and 'on Ampere the AutoRound tier serves this model faster', so on 2x 3090 this is a COMPATIBILITY path; for throughput on Ampere use vllm/qwen38-27b-dual-fast (AutoRound INT4, verify-full 9/9, MTP accept 3.12). Its real case is Blackwell (sm_120+) where the A4 groups execute. ⭐ Kernel selection is AUTOMATIC per card -- one compose gives FP4 compute on Blackwell and Marlin W4A16 on Ampere; nothing selects or overrides it. ⚠️ NVFP4 *KV* is NOT available and has NO fallback: it routes to a trtllm-gen FP4 FMHA kernel built only for datacenter Blackwell (sm_100/103) and crashes on consumer sm_120 (vLLM #43562 / TRT-LLM #10241); no hardware class lists nvfp4 KV and launch_compat C5 REFUSES rather than downgrading -- fp8_e4m3 is the FP4-era KV here, as on all six 3.6/Tess nvfp4 slugs. ⚠️ MTP exposed to OPEN vllm#50021; mitigate with SPEC_N=0. On the 3.6 sibling the original OOM root-caused to MTP (draft head + cudagraphs + GDN prefill scratch), NOT context. ⚠️ NOTHING HAS BOOTED: authored on a 2x sm_86 rig where even a green boot would exercise only the fallback, not the FP4 path this quant exists for. First Blackwell boot IS the validation. Launch requires --force (experimental). Detail: learnings/qwen3.8-27b.md."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  sgl/thinkingcap38-27b-dual-max:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: opt-in
+    chat_template: null
+    tp: 2
+    max_ctx: 163840
+    max_num_seqs: 1
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/dual/fp8/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8174
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of sgl/qwen38-27b-dual-max (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant. ⭐ Opt-in host-RAM prefix tier (2026-09-25): KV_OFFLOAD_GB -> SGLang HiCache with --mamba-max-states-per-path 1 (+ slru); optional disk tier KV_OFFLOAD_DISK / KV_OFFLOAD_DIR / KV_OFFLOAD_DISK_GB. Off by default."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi4-max:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.86
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi4/fp8/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8177
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of sgl/qwen38-27b-multi4-max (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi8-max:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.86
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi8/fp8/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8185
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of sgl/qwen38-27b-multi8-max (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi4-supermax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: zlab-qwen38-dflash2
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.84
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi4/fp8/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8179
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of sgl/qwen38-27b-multi4-supermax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi8-supermax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: zlab-qwen38-dflash2
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.84
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi8/fp8/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8187
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of sgl/qwen38-27b-multi8-supermax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-dual-fast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: opt-in
+    chat_template: null
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/dual/autoround-int4/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8173
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of sgl/qwen38-27b-dual-fast (same compose; only weights, served name, container and port differ). BOOTED + verify-full PASS 2026-09-25 on these weights (K=20, KV_OFFLOAD_GB=64): pool 548,520 (= the sibling), MTP accept len 2.84, vision 4/4, 0 errors; no bench, soak or 8-pack yet. PolyForm Small Business 1.0.0 + BottleCap personal-use grant. ⭐ Mirrors the sibling K=20 default (2026-09-25, MAX_MAMBA_CACHE_SIZE; =auto restores auto-fit): measured on the sibling at 548,520 tokens = two full 262,144-token sessions; the 2026-09-25 boot confirms the same pool on these weights. ⭐ Opt-in host-RAM prefix tier (2026-09-25): KV_OFFLOAD_GB -> SGLang HiCache with --mamba-max-states-per-path 1 (+ slru); optional disk tier KV_OFFLOAD_DISK / KV_OFFLOAD_DIR / KV_OFFLOAD_DISK_GB. Off by default."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi4-fast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.9
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi4/autoround-int4/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8176
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of sgl/qwen38-27b-multi4-fast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi8-fast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.9
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi8/autoround-int4/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8184
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of sgl/qwen38-27b-multi8-fast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-dual-superfast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: zlab-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: 0.82
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/dual/autoround-int4/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8175
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of sgl/qwen38-27b-dual-superfast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi4-superfast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: zlab-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.82
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi4/autoround-int4/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8178
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of sgl/qwen38-27b-multi4-superfast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  sgl/thinkingcap38-27b-multi8-superfast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: sglang-stable
+    drafter: zlab-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: null
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.82
+    compose_path: models/thinkingcap-qwen3.8-27b/sglang/compose/multi8/autoround-int4/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8186
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of sgl/qwen38-27b-multi8-superfast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+  vllm/thinkingcap38-27b-dual-max:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: opt-in
+    chat_template: qwen38-reasoning-effort
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/dual/fp8/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8158
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-dual-max (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi4-max:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi4/fp8/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8164
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-multi4-max (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi8-max:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi8/fp8/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8170
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-multi8-max (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-dual-supermax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 2
+    max_ctx: 147456
+    max_num_seqs: 1
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/dual/fp8/dflash2-fp8.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8159
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-dual-supermax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi4-supermax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi4/fp8/dflash2-fp8.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8165
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-multi4-supermax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi8-supermax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi8/fp8/dflash2-fp8.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8171
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-multi8-supermax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-dual-ultramax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/dual/fp8/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: true
+    required_engine_features: []
+    default_port: 8160
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-dual-ultramax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions:
+      - dflash2
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    supported_sm:
+      - 8.6
+      - 8.9
+      - 9.0
+      - 10.0
+      - 12.0
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi4-ultramax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi4/fp8/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8166
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-multi4-ultramax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi8-ultramax:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: fp8
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: bf16
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.92
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi8/fp8/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8172
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the fp8 weights — REPLICA of vllm/qwen38-27b-multi8-ultramax (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-dual-fast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: opt-in
+    chat_template: qwen38-reasoning-effort
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 8
+    mem_util: 0.9
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/dual/autoround-int4/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8155
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-dual-fast (same compose; only weights, served name, container and port differ). BOOTED 2026-09-23 on the reference rig (2x 3090 PCIe, 230 W, vLLM v0.30.0) via an equivalent compose (verify-full 10/10), and through switch.sh on THIS slug 2026-09-24: verify-full 9/10 — the one fail is the 2+2 reasoning-length heuristic (41 chars < its 50-char floor); fixed 2026-09-26 (verify-full now asks a multi-step question and passes short-but-present reasoning; 0 fails on re-check): ThinkingCap's token-efficient thinking, engaged and extracted correctly, not a serving fault; decode 74.0 narrative / 101.0 code tok/s; prefill 1,720 @10K / 1,246 @90K; MTP accept len 3.6-5.0 at n=4; a 20K-token forced generation held accept 2.7-4.0 with 0 restarts (no #1052-class collapse). Quality (8-pack) not yet run. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi4-fast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 8
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi4/autoround-int4/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8161
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-multi4-fast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi8-fast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: qwen-mtp-builtin
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 8
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi8/autoround-int4/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8167
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-multi8-fast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-dual-superfast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: 0.9
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/dual/autoround-int4/dflash2-fp8.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8156
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-dual-superfast (same compose; only weights, served name, container and port differ). BOOTED 2026-09-23 on the reference rig (2x 3090 PCIe, 230 W, vLLM v0.30.0) via an equivalent compose, and through switch.sh on THIS slug 2026-09-24 (verify-full PASS both times); decode 80.0 narrative / 157.6 code tok/s vs 84.0 / 154.0 for the Frozenlock sibling in the same session; prefill 1,768 @10K / 1,295 @90K; DFlash2 accept 2.9-6.4 (sibling 4.1-6.1) — the base-trained drafter converts on the fine-tune. Quality (8-pack) not yet run. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi4-superfast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi4/autoround-int4/dflash2-fp8.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8162
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-multi4-superfast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi8-superfast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi8/autoround-int4/dflash2-fp8.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8168
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-multi8-superfast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-dual-ultrafast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: fp8_e4m3
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 2
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: 0.9
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/dual/autoround-int4/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8157
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-dual-ultrafast (same compose; only weights, served name, container and port differ). BOOTED 2026-09-24 on the reference rig (2x 3090 PCIe, 230 W, vLLM v0.30.0) through switch.sh on THIS slug: verify-full PASS; decode 108.3 narrative / 198.9 code tok/s vs 108.8/191.5 and 111.1/196.6 for the Frozenlock sibling (two boots, same day); prefill 1,778 @10K / 1,376 @90K; DFlash2 accept 5.0-6.7 on bench traffic; FA2 fp8-KV plugin verified. Quality (8-pack) not yet run. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    supported_sm:
+      - 8.6
+      - 8.9
+      - 9.0
+      - 10.0
+      - 12.0
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi4-ultrafast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: bf16
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 4
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi4/autoround-int4/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8163
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-multi4-ultrafast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  vllm/thinkingcap38-27b-multi8-ultrafast:
+    origin: core
+    model: thinkingcap-qwen3.8-27b
+    weights_variant: autoround-int4
+    workload: long-ctx-single
+    engine: vllm-stable
+    drafter: syvai-qwen38-dflash2
+    spec_method: null
+    kv_format: bf16
+    act_format: int8
+    act8_capable: true
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    kv_offload: null
+    chat_template: qwen38-reasoning-effort
+    tp: 8
+    max_ctx: 262144
+    max_num_seqs: 2
+    mem_util: 0.95
+    compose_path: models/thinkingcap-qwen3.8-27b/vllm/compose/multi8/autoround-int4/dflash2.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8169
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "ThinkingCap-Qwen3.8-27B (bottlecapai reasoning fine-tune) on the autoround-int4 weights — REPLICA of vllm/qwen38-27b-multi8-ultrafast (same compose; only weights, served name, container and port differ). NOT BOOTED — copied from the sibling, unvalidated. PolyForm Small Business 1.0.0 + BottleCap personal-use grant."
     weights_companions: []
     gateway: false
     serve_aliases: []
@@ -4897,6 +6289,9 @@ defaults:
     vllm:
       single: vllm/qwen-a3b-preview-single
       dual: vllm/qwen-35b-a3b-dual
+  mimo-v2.6-9b:
+    llamacpp:
+      single: llamacpp/mimo9b-single-vision
   qwen3.6-40b-deckard:
     llamacpp:
       dual: llamacpp/deckard40B-dual-mtp

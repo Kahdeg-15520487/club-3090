@@ -19,6 +19,49 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 # any clone. Override with CLUB3090_DIR=... if needed.
 CLUB3090_DIR="${CLUB3090_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
 COMPOSE_BASE="$CLUB3090_DIR/services"
+# This script's own scripts/ dir, symlink resolved: the code gpu-mode runs (lib/,
+# gateway-key.sh) comes from here. `dirname "${BASH_SOURCE[0]}"` alone is the
+# symlink's dir when run as /usr/local/bin/gpu-mode, where no lib/ exists.
+GPU_MODE_SCRIPTS="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# Settings for `sudo docker compose` (club-3090#1466). sudo strips the environment, so
+# each compose call gets the resolved settings (your club-3090 config, then the repo
+# .env; a variable already set in this shell wins) in a 0600 temp file passed as
+# --env-file — built FRESH for every call, so a value saved earlier in this run
+# (start_comfyui saves COMFYUI_ROOT) reaches the next one, and removed right after
+# it. Not passed when nothing is configured, so compose keeps its own .env lookup.
+# The loader is library code, so it comes from THIS script's tree; CLUB3090_DIR is
+# only the clone whose settings (its legacy .env) are read.
+# shellcheck source=lib/club-config.sh
+. "$GPU_MODE_SCRIPTS/lib/club-config.sh"
+# Compile-cache / KV-disk-tier dirs for model composes (#1466 phase 4). A partial copy of
+# scripts/ without it (the gateway tests copy only what they exercise) keeps every
+# compose on its in-repo defaults, which is what a plain `docker compose up` does.
+if [ -f "$GPU_MODE_SCRIPTS/lib/engine-cache.sh" ]; then
+    # shellcheck source=lib/engine-cache.sh
+    . "$GPU_MODE_SCRIPTS/lib/engine-cache.sh"
+else
+    club_engine_cache_env() { :; }
+fi
+# The club3090.slug label for model composes (COMPOSE_SLUG=<slug> compose_at …): the
+# same override switch.sh adds, so a mode and a switch.sh launch of one slug produce
+# the same compose config and neither recreates the other's container.
+if [ -f "$GPU_MODE_SCRIPTS/lib/slug-label.sh" ]; then
+    # shellcheck source=lib/slug-label.sh
+    . "$GPU_MODE_SCRIPTS/lib/slug-label.sh"
+else
+    club_slug_label_override() { :; }
+fi
+# Studio paths YOU exported, captured BEFORE comfyui-paths.sh (below) exports its derived
+# ones: passed through sudo on every compose call, so a one-run override reaches the
+# containers without being saved. Derived values are not passed — the saved value, else
+# the compose's default, applies — so a hand-set COMFYUI_ROOT in your settings is never
+# overridden by a derivation.
+GPU_MODE_SHELL_ENV=()
+for _v in COMFYUI_ROOT COMFYUI_OUTPUT_DIR; do
+    [ -n "${!_v:-}" ] && GPU_MODE_SHELL_ENV+=("$_v=${!_v}")
+done
+unset _v
 # ComfyUI/studio paths derive from MODEL_DIR (see services/comfyui/comfyui-paths.sh) so the
 # ai-studio scene's compose mounts + missing-model check match wherever the user keeps models.
 if [ -f "$COMPOSE_BASE/comfyui/comfyui-paths.sh" ]; then
@@ -104,24 +147,16 @@ SERVICES=(openwebui litellm qdrant searxng spark-dashboard)
 # Run a docker compose command in any directory, with optional -f override.
 # Args: <dir> <action> [compose_file]
 #
-# Always passes --env-file $CLUB3090_DIR/.env when that file exists, so
-# ${MODEL_DIR} (and other repo-level vars) resolve correctly regardless of
-# which compose dir we're cd'd into. Without this, docker compose only
-# auto-loads .env from the compose file's own directory and falls back to
-# the relative-path default `../../../../../models-cache` (mostly empty).
+# Passes --env-file $CLUB3090_COMPOSE_ENV_FILE (the resolved settings, see the
+# top of this file) whenever anything is configured, so ${MODEL_DIR} (and other
+# repo-level vars) resolve correctly regardless of which compose dir we're cd'd
+# into. Without it, docker compose only auto-loads .env from the compose file's
+# own directory and falls back to the relative-path default
+# `../../../../../models-cache` (mostly empty).
 #
 # stderr is preserved (no 2>/dev/null) so real errors surface.
 compose_at() {
-    local dir=$1
-    local action=$2
-    local file=${3:-docker-compose.yml}
-    if [ -f "$dir/$file" ]; then
-        local env_args=()
-        if [ -f "$CLUB3090_DIR/.env" ]; then
-            env_args=(--env-file "$CLUB3090_DIR/.env")
-        fi
-        (cd "$dir" && sudo docker compose "${env_args[@]}" -f "$file" $action)
-    fi
+    compose_at_env "$1" "$2" "${3:-docker-compose.yml}"
 }
 
 # #715 gap 4 — start-failure tracking. start_* helpers used to swallow a failed
@@ -140,14 +175,33 @@ c3_mark_start_failure() { FAILED_SERVICES+=("$1"); }
 # Args: <dir> <action> <file> [VAR=val ...]
 compose_at_env() {
     local dir=$1 action=$2 file=$3; shift 3
-    local envs=("$@")
-    if [ -f "$dir/$file" ]; then
-        local env_args=()
-        if [ -f "$CLUB3090_DIR/.env" ]; then
-            env_args=(--env-file "$CLUB3090_DIR/.env")
-        fi
-        (cd "$dir" && sudo "${envs[@]}" docker compose "${env_args[@]}" -f "$file" $action)
+    # The caller's assignments come last, so they win over the exported studio paths.
+    local envs=("${GPU_MODE_SHELL_ENV[@]}" "$@")
+    [ -f "$dir/$file" ] || return 0
+    local env_args=() rc=0 CLUB3090_COMPOSE_ENV_FILE
+    CLUB3090_COMPOSE_ENV_FILE="$(club_config_compose_env_file "$CLUB3090_DIR" 2>/dev/null || true)"
+    if [ -s "$CLUB3090_COMPOSE_ENV_FILE" ]; then
+        env_args=(--env-file "$CLUB3090_COMPOSE_ENV_FILE")
     fi
+    # #1466 4a/4b — the compile-cache / KV-disk-tier dirs, computed HERE, as you: sudo drops
+    # HOME, and docker would create a missing dir as root. Rendered the way sudo will see it
+    # (--clean-env: only the env file and these assignments), so the image key matches the
+    # image compose runs. Prints nothing for a compose that mounts neither.
+    if [[ "$action" == up* ]]; then
+        local _ec
+        while IFS= read -r _ec; do envs+=("$_ec"); done < <(club_engine_cache_env "$dir" "$file" \
+            --root "$CLUB3090_DIR" --compose-bin "docker compose" --docker "sudo docker" --clean-env \
+            "${env_args[@]}" -- "${envs[@]}")
+    fi
+    local label_args=()
+    if [[ "$action" == up* && -n "${COMPOSE_SLUG:-}" ]]; then
+        local _lo
+        _lo="$(club_slug_label_override "$COMPOSE_SLUG" "$dir/$file" "$CLUB3090_DIR")"
+        [ -n "$_lo" ] && label_args=(-f "$_lo")
+    fi
+    (cd "$dir" && sudo "${envs[@]}" docker compose "${env_args[@]}" -f "$file" "${label_args[@]}" $action) || rc=$?
+    rm -f "$CLUB3090_COMPOSE_ENV_FILE"
+    return "$rc"
 }
 
 # Standard service helpers (look in $COMPOSE_BASE/<service>)
@@ -161,10 +215,46 @@ start_service() {
     # bind source and the proxy fails to parse its config. This is also the
     # bootstrap on a fresh checkout. --no-restart: we are about to start it.
     if [[ "$1" == "litellm" ]]; then
-        bash "$(dirname "${BASH_SOURCE[0]}")/lib/litellm-sync.sh" --no-restart --quiet || true
+        bash "$GPU_MODE_SCRIPTS/lib/litellm-sync.sh" --no-restart --quiet || true
     fi
     printf "  ${GREEN}▲${NC} Starting %-12s" "$1..."
-    compose_cmd "$1" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "$1"; }
+    if [[ "$1" == "litellm" ]]; then
+        compose_litellm_up "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "$1"; }
+    else
+        compose_cmd "$1" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "$1"; }
+    fi
+    if [[ "$1" == "litellm" && "$(_gateway_key)" == "$GATEWAY_DEFAULT_KEY" ]]; then
+        echo -e "  ${YELLOW}⚠ The gateway is on the public default key — anyone on your network can use it: bash $CLUB3090_DIR/scripts/gateway-key.sh rotate --apply${NC}"
+    fi
+}
+
+# Start the gateway with the keys this rig's own routes use (club-3090#1466). They are
+# saved in secrets.env, which the gateway does not get whole: litellm_local.py writes
+# just the keys a route names to a 0600 temp file, and compose loads it through
+# CLUB3090_LITELLM_ROUTE_KEYS (services/litellm/docker-compose.yml). The file's PATH
+# rides sudo's argv, like the studio paths above; the keys never do. Removed as soon
+# as compose returns: it reads an env_file only when it creates the container.
+# Args: <compose action>, e.g. "up -d"
+compose_litellm_up() {
+    local keys="" rc=0
+    if [ -f "$GPU_MODE_SCRIPTS/lib/litellm_local.py" ]; then
+        keys="$(python3 "$GPU_MODE_SCRIPTS/lib/litellm_local.py" route-keys-file --root "$CLUB3090_DIR" || true)"
+    fi
+    compose_at_env "$COMPOSE_BASE/litellm" "$1" docker-compose.yml ${keys:+"CLUB3090_LITELLM_ROUTE_KEYS=$keys"} || rc=$?
+    if [ -n "$keys" ]; then rm -f "$keys"; fi
+    return "$rc"
+}
+
+# The key the gateway gets from compose (club-3090#1467): LITELLM_MASTER_KEY as it
+# goes into the --env-file above — the stored value, or the shell's when a config
+# file also sets it — else the compose's public default. A key set ONLY in the shell
+# is not in that file, and sudo strips the shell, so compose falls back to the
+# default there too. Never printed.
+GATEWAY_DEFAULT_KEY="sk-litellm-master-key"
+_gateway_key() {
+    local k
+    k="$(club_config_resolve "$CLUB3090_DIR" 2>/dev/null | awk -F'\t' '$1 == "LITELLM_MASTER_KEY" { print $3; exit }')"
+    printf '%s\n' "${k:-$GATEWAY_DEFAULT_KEY}"
 }
 
 stop_service() {
@@ -172,10 +262,186 @@ stop_service() {
     compose_cmd "$1" "down" && echo "done" || echo "skipped"
 }
 
+# ── Support-service image drift (#1436 follow-up) ────────────────────────────
+# A `git pull` that bumps a service's pinned image changes nothing that is
+# already running: only `docker compose up -d` recreates a container on the new
+# image. switch.sh (its LiteLLM sync uses `docker restart`), reboots and
+# `restart: unless-stopped` all keep the OLD image. `status` reports the drift;
+# `upgrade` fixes it.
+#
+# service_image_rows prints one TAB-separated row per support service:
+#   <service> <container> <state> <pinned image> <running image>
+# state: current | drift | stopped. The pin comes from `docker compose config`
+# (so ${VAR:-default} image lines resolve, with the same .env gpu-mode uses);
+# the running image is the container's own Config.Image.
+# docker for the read-only drift checks: plain `docker` when the user can reach
+# the daemon, else sudo. SVC_SUDO_FLAGS=-n (set by update.sh) keeps sudo from
+# prompting when this runs outside an interactive gpu-mode command.
+_svc_docker() {
+    if docker info >/dev/null 2>&1; then docker "$@"; else sudo ${SVC_SUDO_FLAGS:-} docker "$@"; fi
+}
+
+service_image_rows() {
+    local svc dir env_args=() cfg pinned cname running state
+    local CLUB3090_COMPOSE_ENV_FILE
+    CLUB3090_COMPOSE_ENV_FILE="$(club_config_compose_env_file "$CLUB3090_DIR" 2>/dev/null || true)"
+    [ -s "$CLUB3090_COMPOSE_ENV_FILE" ] && env_args=(--env-file "$CLUB3090_COMPOSE_ENV_FILE")
+    for svc in "${SERVICES[@]}"; do
+        dir="$COMPOSE_BASE/$svc"
+        [ -f "$dir/docker-compose.yml" ] || continue
+        cfg=$(cd "$dir" && docker compose "${env_args[@]}" -f docker-compose.yml config --format json 2>/dev/null) || continue
+        read -r pinned cname < <(printf '%s' "$cfg" | python3 -c '
+import json, sys
+svc = next(iter(json.load(sys.stdin)["services"].values()))
+print(svc.get("image") or "-", svc.get("container_name") or "-")' 2>/dev/null) || continue
+        [ -n "$pinned" ] && [ "$pinned" != "-" ] || continue
+        # `|| true`: gpu-mode runs under `set -e`, and a service whose container was
+        # never created makes inspect exit 1 — that must read as "stopped", not end the loop.
+        running=$(_svc_docker inspect "$cname" --format '{{.Config.Image}}' 2>/dev/null || true)
+        if [ -z "$running" ] || [ "$(_svc_docker inspect "$cname" --format '{{.State.Running}}' 2>/dev/null || true)" != "true" ]; then
+            state=stopped
+        elif [ "$running" = "$pinned" ]; then
+            state=current
+        else
+            state=drift
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$svc" "$cname" "$state" "$pinned" "${running:--}"
+    done
+    rm -f "$CLUB3090_COMPOSE_ENV_FILE"
+}
+
+show_service_images() {
+    echo -e "${CYAN}═══ Service Images ═══${NC}"
+    local svc cname state pinned running behind=0
+    while IFS=$'\t' read -r svc cname state pinned running; do
+        case "$state" in
+            current) echo -e "  ${GREEN}✓${NC} $(printf '%-16s' "$svc") $pinned" ;;
+            drift)   echo -e "  ${YELLOW}⚠${NC} $(printf '%-16s' "$svc") running $running → pinned $pinned"; behind=$((behind + 1)) ;;
+            stopped) echo -e "  - $(printf '%-16s' "$svc") not running (pinned $pinned)" ;;
+        esac
+    done < <(service_image_rows)
+    if [ "$behind" -gt 0 ]; then
+        echo -e "  ${YELLOW}→ ${behind} running service(s) behind their pinned image: run 'gpu-mode upgrade'${NC}"
+    fi
+    # Gateway request logging writes full prompts and replies; say so while it is on
+    # so it isn't left on by accident (scripts/litellm-log.sh; off by default).
+    local llog
+    llog=$( { _svc_docker inspect litellm --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null || true; } \
+            | sed -n 's/^LITELLM_LOG=//p' | head -1)
+    if [ -n "$llog" ]; then
+        echo -e "  ${YELLOW}⚠ LiteLLM request logging is ON (LITELLM_LOG=${llog}) — full prompts are logged: bash $CLUB3090_DIR/scripts/litellm-log.sh off${NC}"
+    fi
+}
+
+# Back up a named docker volume to $CLUB3090_DIR/backups/ (gitignored). tar runs
+# inside the given image (it must have tar; qdrant's does, without gzip), and
+# the stream is compressed on the host. -S keeps sparse files small.
+backup_volume() {
+    local volume=$1 image=$2 label=$3
+    local dest="$CLUB3090_DIR/backups/${label}-$(date +%Y%m%d-%H%M%S).tar.gz"
+    mkdir -p "$CLUB3090_DIR/backups" || return 1
+    sudo docker run --rm --entrypoint tar -v "${volume}:/data:ro" "$image" -cSf - -C /data . | gzip > "$dest" \
+        && [ -s "$dest" ] && echo "$dest"
+}
+
+mode_upgrade() {
+    local no_backup=0
+    [ "${1:-}" = "--no-backup" ] && no_backup=1
+    echo -e "${CYAN}═══ Upgrade support services to their pinned images ═══${NC}"
+    echo "Recreates RUNNING support services whose image differs from the compose pin."
+    echo "Stopped services are left alone: they pick up the pin the next time a mode starts them."
+    echo ""
+    local svc cname state pinned running drifted=()
+    while IFS=$'\t' read -r svc cname state pinned running; do
+        case "$state" in
+            current) echo -e "  ${GREEN}✓${NC} $(printf '%-16s' "$svc") already on $pinned" ;;
+            stopped) echo -e "  - $(printf '%-16s' "$svc") not running — nothing to do" ;;
+            drift)   echo -e "  ${YELLOW}⚠${NC} $(printf '%-16s' "$svc") $running → $pinned"; drifted+=("$svc|$cname|$running") ;;
+        esac
+    done < <(service_image_rows)
+    echo ""
+    if [ "${#drifted[@]}" -eq 0 ]; then
+        echo "Nothing to upgrade."
+        return 0
+    fi
+    local entry volume backup
+    for entry in "${drifted[@]}"; do
+        IFS='|' read -r svc cname running <<< "$entry"
+        # Qdrant migrates its storage forward on first start and cannot be
+        # rolled back onto the same volume, so back it up (container stopped,
+        # consistent copy) unless --no-backup.
+        if [ "$svc" = "qdrant" ] && [ "$no_backup" -eq 0 ]; then
+            volume=$(sudo docker inspect "$cname" --format '{{range .Mounts}}{{if eq .Destination "/qdrant/storage"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)
+            if [ -n "$volume" ]; then
+                printf "  ${YELLOW}■${NC} Backing up %-10s" "qdrant..."
+                sudo docker stop "$cname" >/dev/null 2>&1
+                if backup=$(backup_volume "$volume" "$running" "qdrant-data"); then
+                    echo "done → $backup"
+                else
+                    echo "FAILED — leaving qdrant on $running"
+                    sudo docker start "$cname" >/dev/null 2>&1
+                    c3_mark_start_failure "qdrant (backup)"
+                    continue
+                fi
+            fi
+        fi
+        start_service "$svc"
+    done
+    echo ""
+    show_service_images
+}
+
+# `gpu-mode gateway` (club-3090#1467): recreate ONLY the LiteLLM gateway, the way every
+# mode starts it — routes re-rendered first, then `compose_litellm_up`, so the settings
+# (the gateway key in secrets.env above all) reach compose through the per-call
+# --env-file, and the routes' own keys through CLUB3090_LITELLM_ROUTE_KEYS.
+# This is the restart `gateway-key.sh rotate --apply` needs: no model is started or
+# stopped. --force-recreate, because a container keeps the environment it was created
+# with and reads config.runtime.yaml only at start, so a plain `up -d` can leave the old
+# key or routes in place. Starts the gateway if it was stopped. Request logging
+# (scripts/litellm-log.sh) comes back off, as after any start. Waits for
+# /health/liveliness (GPU_MODE_GATEWAY_WAIT_S, default 120) at CLUB3090_GATEWAY_URL
+# (default http://127.0.0.1:4000), then prints gateway-key.sh status.
+mode_gateway() {
+    local url="${CLUB3090_GATEWAY_URL:-http://127.0.0.1:4000}" limit="${GPU_MODE_GATEWAY_WAIT_S:-120}" waited=0
+    url="${url%/}"; url="${url%/v1}"
+    echo -e "${CYAN}═══ Recreating the LiteLLM gateway ═══${NC}"
+    echo "Recreates ONLY the litellm container, with your current settings (the gateway key included)."
+    echo "No model is started or stopped."
+    echo ""
+    if [ ! -f "$COMPOSE_BASE/litellm/docker-compose.yml" ]; then
+        echo -e "  ${RED}✗ no $COMPOSE_BASE/litellm/docker-compose.yml${NC}" >&2
+        c3_mark_start_failure "litellm"; return 0
+    fi
+    printf "  ${GREEN}▲${NC} Rendering the gateway's routes..."
+    if bash "$GPU_MODE_SCRIPTS/lib/litellm-sync.sh" --no-restart --quiet; then
+        echo "done"
+    else
+        echo "failed — starting with the routes already on disk"
+    fi
+    printf "  ${GREEN}▲${NC} Recreating %-12s" "litellm..."
+    if ! compose_litellm_up "up -d --force-recreate"; then
+        echo "failed"; c3_mark_start_failure "litellm"; return 0
+    fi
+    echo "done"
+    printf "  ${GREEN}◔${NC} Waiting for %s/health/liveliness..." "$url"
+    until curl -sf -m 2 -o /dev/null "$url/health/liveliness" 2>/dev/null; do
+        if [ "$waited" -ge "$limit" ]; then
+            echo "no answer after ${limit}s"
+            echo -e "  ${RED}✗ The gateway did not come up.${NC} Inspect: sudo docker logs litellm" >&2
+            c3_mark_start_failure "litellm (not answering)"; return 0
+        fi
+        sleep 2; waited=$((waited + 2))
+    done
+    echo "up"
+    echo ""
+    CLUB3090_DIR="$CLUB3090_DIR" CLUB3090_GATEWAY_URL="$url" bash "$GPU_MODE_SCRIPTS/gateway-key.sh" status || true
+}
+
 # Project-specific helpers
 start_27b_dual_mtp() {
     printf "  ${GREEN}▲${NC} Starting 27b-dual-mtp..."
-    compose_at "$DUAL_27B_DIR" "up -d" fp8-mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "27b-dual-mtp"; }
+    COMPOSE_SLUG=vllm/dual compose_at "$DUAL_27B_DIR" "up -d" fp8-mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "27b-dual-mtp"; }
 }
 stop_27b_dual_mtp() {
     printf "  ${RED}▼${NC} Stopping 27b-dual-mtp..."
@@ -221,7 +487,7 @@ stop_all_27b() {
 # vllm/qwen-35b-a3b-dual (AutoRound INT4 + fp8 KV + 262K + vision, :8051).
 start_35b_a3b_dual() {
     printf "  ${GREEN}▲${NC} Starting 35b-a3b-dual..."
-    compose_at "$A3B_DUAL_DIR" "up -d" fp8.yml && echo "done" || { echo "failed"; c3_mark_start_failure "35b-a3b-dual"; }
+    COMPOSE_SLUG=vllm/qwen-35b-a3b-dual compose_at "$A3B_DUAL_DIR" "up -d" fp8.yml && echo "done" || { echo "failed"; c3_mark_start_failure "35b-a3b-dual"; }
 }
 stop_35b_a3b_dual() {
     printf "  ${RED}▼${NC} Stopping 35b-a3b-dual..."
@@ -231,7 +497,7 @@ stop_35b_a3b_dual() {
 # Gemma 4 12B single-card vLLM (gemma4_unified arch-preview image, AutoRound INT8 + MTP n=2).
 start_gemma_12b() {
     printf "  ${GREEN}▲${NC} Starting gemma-12b..."
-    compose_at "$GEMMA_12B_DIR" "up -d" mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "gemma-12b"; }
+    COMPOSE_SLUG=vllm/gemma-12b-single-int8-mtp compose_at "$GEMMA_12B_DIR" "up -d" mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "gemma-12b"; }
 }
 stop_gemma_12b() {
     printf "  ${RED}▼${NC} Stopping gemma-12b..."
@@ -242,8 +508,10 @@ stop_gemma_12b() {
 # GPU-bound — mutex with all vLLM / SGLang / llama-server LLM serving.
 start_comfyui() {
     printf "  ${GREEN}▲${NC} Starting comfyui..."
-    # Pin COMFYUI_ROOT into repo-root .env so the compose's `--env-file` mounts the SAME tree the
-    # downloads went into (not the /mnt default) on any rig whose MODEL_DIR isn't /mnt — #510/#530.
+    # Save the derived COMFYUI_ROOT (+ COMFYUI_OUTPUT_DIR) to your club-3090 settings
+    # (club3090.env, #1481) unless one is saved already, so the per-call settings file
+    # compose_at passes as --env-file mounts the SAME tree the downloads went into (not the
+    # /mnt default) on any rig whose MODEL_DIR isn't /mnt — #510/#530.
     type c3_persist_comfy_root >/dev/null 2>&1 && c3_persist_comfy_root || true
     # Pre-create the bind-mount sources USER-OWNED before sudo docker can root-own
     # them (#715 gap 1); a damaged (root-owned) tree fails loud with the chown fix.
@@ -268,12 +536,10 @@ start_studio_gallery() {
 # coexists with the image lanes); gpu1 = GPU1 (NOT during a video render — GPU1 is the DiT donor);
 # cpu = frees GPU0 for long single-card video, but craft is ~single-digit tok/s. See video.md.
 _director_device() {
-    local d=gpu0
-    if [ -f "$CLUB3090_DIR/.env" ]; then
-        local v
-        v=$(command grep -E '^STUDIO_DIRECTOR_DEVICE=' "$CLUB3090_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' ")
-        [ -n "$v" ] && d="$v"
-    fi
+    local d=gpu0 v
+    v="$(club_config_get STUDIO_DIRECTOR_DEVICE "$CLUB3090_DIR" 2>/dev/null || true)"
+    v="${v//[[:space:]]/}"
+    [ -n "$v" ] && d="$v"
     echo "$d"
 }
 start_studio_director() {
@@ -376,7 +642,7 @@ start_gemma_int8() {
     # compose_at path bypassed switch.sh's status gate. Function name kept
     # (every mode's stop-list references it).
     printf "  ${GREEN}▲${NC} Starting gemma-31b..."
-    compose_at "$GEMMA_31B_DUAL_DIR" "up -d" base.yml && echo "done" || { echo "failed"; c3_mark_start_failure "gemma-31b"; }
+    COMPOSE_SLUG=vllm/gemma-31b-dual compose_at "$GEMMA_31B_DUAL_DIR" "up -d" base.yml && echo "done" || { echo "failed"; c3_mark_start_failure "gemma-31b"; }
 }
 stop_gemma_int8() {
     printf "  ${RED}▼${NC} Stopping gemma-31b..."
@@ -393,7 +659,7 @@ stop_all_gemma() {
 
 start_deckard() {
     printf "  ${GREEN}▲${NC} Starting deckard-40b..."
-    compose_at "$DECKARD_DIR" "up -d" mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "deckard"; }
+    COMPOSE_SLUG=llamacpp/deckard40B-dual-mtp compose_at "$DECKARD_DIR" "up -d" mtp.yml && echo "done" || { echo "failed"; c3_mark_start_failure "deckard"; }
 }
 stop_deckard() {
     printf "  ${RED}▼${NC} Stopping deckard-40b..."
@@ -412,6 +678,8 @@ show_status() {
     echo ""
     echo -e "${CYAN}═══ Service Status ═══${NC}"
     sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
+    echo ""
+    show_service_images
     echo ""
     echo -e "${CYAN}═══ Active Model(s) ═══${NC}"
     # Single source of truth for "is anything serving?" (#865). Each probe
@@ -537,10 +805,13 @@ show_status() {
         # suppress the "no inference endpoint" warning on an LLM-idle rig.
         echo -e "  ${GREEN}▶${NC} ComfyUI @ :8188          → image/video generation (GPU-bound, mutex with LLM)"
     fi
-    if curl -sf -m 2 -H "Authorization: Bearer sk-litellm-master-key" http://localhost:4000/v1/models >/dev/null 2>&1; then
+    # The header goes in on stdin (-H @-), so the key is never on a command line.
+    local gw_key
+    gw_key="$(_gateway_key)"
+    if curl -sf -m 2 -H @- http://localhost:4000/v1/models <<<"Authorization: Bearer $gw_key" >/dev/null 2>&1; then
         _endpoint_up=1
         local m
-        m=$(curl -sf -m 2 -H "Authorization: Bearer sk-litellm-master-key" http://localhost:4000/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
+        m=$(curl -sf -m 2 -H @- http://localhost:4000/v1/models <<<"Authorization: Bearer $gw_key" | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} LiteLLM @ :4000         → ${m:-unknown}"
     fi
     if [ "$_endpoint_up" -eq 0 ]; then
@@ -803,9 +1074,9 @@ preflight_studio_models() {
         echo -e "${YELLOW}[preflight] studio manifest missing ($manifest) — skipping model check.${NC}" >&2
         return 0
     fi
-    # Roots: weights (director, MODEL_DIR from .env) · comfy (image/video/audio tree).
+    # Roots: weights (director, MODEL_DIR from the settings) · comfy (image/video/audio tree).
     local model_dir comfy_models
-    model_dir="$(command grep -E '^MODEL_DIR=' "$CLUB3090_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-)"
+    model_dir="$(club_config_get MODEL_DIR "$CLUB3090_DIR" 2>/dev/null || true)"
     model_dir="${model_dir:-/mnt/models/huggingface}"
     comfy_models="${COMFYUI_MODELS_DIR:-/mnt/models/comfyui/models}"
     local director_missing=0 warns=() modality label root rel size installer base
@@ -1163,6 +1434,10 @@ mode_off() {
 # is the default; --json emits the [{name,group,description,services,ports,gpus}]
 # array the contract specifies. services/ports are comma-joined in the TSV and
 # split into JSON arrays; gpus is the human GPU-usage note.
+#
+# Not listed, like status / upgrade / service-images: `gateway` (recreate only the
+# LiteLLM gateway). It is a command, not a scene — c3 renders every row it doesn't hide
+# as a scene to switch to, and its hidden set (power-cap, prune, prune-all) lives in c3.
 list_modes_data() {
     # name<TAB>group<TAB>description<TAB>services<TAB>ports<TAB>gpus
     cat <<'TSV'
@@ -1253,7 +1528,15 @@ usage() {
     echo "                     + Open WebUI (:8080) — image/video/music/SFX/voice lanes (alias: aistudio)"
     echo ""
     echo "  off                Stop all services"
-    echo "  status             Show running services, GPU, RAM, disk, Docker disk"
+    echo "  status             Show running services, service image drift, GPU, RAM, disk, Docker disk"
+    echo "  upgrade            Recreate running support services (Open WebUI, LiteLLM, Qdrant, SearXNG,"
+    echo "                     spark-dashboard) that are behind their pinned image — run after a"
+    echo "                     'git pull' that bumps one. Backs up Qdrant's volume to backups/ first"
+    echo "                     (its storage migrates forward); '--no-backup' skips that."
+    echo "  gateway            Recreate ONLY the LiteLLM gateway (:4000) with your current settings —"
+    echo "                     after 'gateway-key.sh rotate' (its --apply runs this), or to reload its"
+    echo "                     routes. No model is started or stopped; starts the gateway if it was"
+    echo "                     stopped. Request logging (litellm-log.sh) comes back off."
     echo ""
     echo "  GPU power cap (both 3090s; normally capped below stock for quiet/cool operation):"
     echo "  power-cap on       Re-apply the cap nvidia-power-cap.service defines (read from the"
@@ -1271,6 +1554,12 @@ usage() {
     echo ""
 }
 
+# #1466 — settings still in this checkout: say once how to move them to ~/.config/club-3090.
+case "${1:-}" in
+    chat|qwen27b|27b|qwen35b-a3b|35b-a3b|a3b|35b|gemma-31b|gemma|gemma12b|gemma-12b|deckard|ai-studio|aistudio|off|upgrade|gateway)
+        club_config_migrate_notice "$CLUB3090_DIR" "[gpu-mode]" ;;
+esac
+
 case "${1:-}" in
     chat)               mode_chat ;;
     qwen27b|27b)        mode_27b ;;
@@ -1281,6 +1570,9 @@ case "${1:-}" in
     ai-studio|aistudio)       mode_ai_studio ;;
     off)                mode_off ;;
     status)             show_status ;;
+    upgrade)            mode_upgrade "${2:-}" ;;
+    gateway)            mode_gateway ;;          # recreate only the LiteLLM gateway (#1467)
+    service-images)     show_service_images ;;   # just the drift section (update.sh calls it)
     power-cap|powercap) mode_powercap "${2:-status}" ;;
     prune)              mode_prune ;;
     prune-all)          mode_prune_all ;;

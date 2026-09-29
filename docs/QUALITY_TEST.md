@@ -169,7 +169,7 @@ the three sampler vars by hand remains the only way to change them.
 | `--max-tokens 4096` | The ~1024 default silently truncates long answers into `token_limit` failures that look like wrong answers. |
 | `--thinking-max-tokens 16384` | The thinking arm needs the headroom. |
 | `--timeout-per-case 600` | 16,384 tokens takes real wall-clock. Too tight a cap produces `timeout` rows that read as content misses. |
-| `REASONING_EFFORT=` | Env only — forwarded as the per-request OpenAI `reasoning_effort`. The qwen3.8 composes default to `low` server-side since #1029; pin it anyway so the run records what it measured. ⚠️ Effort is **not** comparable across runs. ⚠️ Qwen3.8's own rungs are `xhigh`/`medium`/`low` — there is no `high`. On the **vLLM** slugs the vendored template (`qwen38-reasoning-effort-template`) maps `high` → `medium`, so it is accepted and records as medium — the un-nudged baseline, NOT xhigh; anything else still raises. Elsewhere `high` **raises**. |
+| `REASONING_EFFORT=` | Env only — forwarded as the per-request OpenAI `reasoning_effort`. The qwen3.8 composes default to `low` server-side since #1029; pin it anyway so the run records what it measured. ⚠️ Effort is **not** comparable across runs. ⚠️ Qwen3.8's own rungs are `xhigh`/`medium`/`low` — there is no `high`. On the vLLM and SGLang slugs the vendored template (`qwen38-reasoning-effort-template`) maps `high` → `xhigh`; anything else still raises. Elsewhere `high` **raises**. ⚠️ On SGLang before 2026-09-27 the per-request effort was **ignored** — the server default (the compose's `REASONING_EFFORT`, `low` unless set at launch) rendered instead ([sglang#38104](https://github.com/sgl-project/sglang/issues/38104)); an SGLang run that set `REASONING_EFFORT` only for the runner measured the boot default. |
 | `--repeat 3` | Add it for anything you'll quote. With `--sampling-from-server` both legs are sampled, so single draws aren't quotable. |
 
 ⚠️⚠️ **Read the failure modes before reading the score.** `timeout` and `token_limit` are **harness
@@ -298,10 +298,10 @@ URL=https://your-endpoint/v1 API_KEY="$YOUR_KEY" MODEL=your-model-id \
 
 ### Worked example — Qwen3.8-Max-Preview (DashScope)
 
-Our first cloud reference ([Discussion #753](https://github.com/noonghunna/club-3090/discussions/753)): `qwen3.8-max-preview` via a LiteLLM proxy that normalizes auth + thinking controls into two routes — `qwen3.8-max` (thinking-on) and `qwen3.8-max-nothink` (`thinking_budget=1`). Result: **125/150 think-off · 134/150 think-on** (n=1) — see the [cloud references table](../BENCHMARKS.md#cloud-references).
+Our first cloud reference ([Discussion #753](https://github.com/noonghunna/club-3090/discussions/753)): `qwen3.8-max-preview` via a LiteLLM proxy that normalizes auth + thinking controls into two routes — `qwen3.8-max` (thinking-on) and `qwen3.8-max-nothink` (`thinking_budget=1`). Result: **125/150 think-off · 134/150 think-on** (n=1) — see the [cloud references table](../BENCHMARKS.md#cloud-references). Those two routes were the measuring rig's own: a cloud route belongs in your own routes file, `~/.config/club-3090/litellm/config.local.yaml` (see `services/litellm/config.local.yaml.example`), with its key saved by `bash scripts/settings.sh set` — never in the tracked catalog.
 
 ```bash
-# via the proxy routes (services/litellm/config.yaml)
+# via this rig's own routes (~/.config/club-3090/litellm/config.local.yaml)
 URL=http://localhost:4000 API_KEY="$LITELLM_KEY" MODEL=qwen3.8-max \
   bash scripts/quality-test.sh --full --enable-thinking --save-json qwen38max-on.json
 URL=http://localhost:4000 API_KEY="$LITELLM_KEY" MODEL=qwen3.8-max-nothink \
@@ -531,6 +531,57 @@ ENABLE_THINKING=1 bash scripts/bench.sh
 
 If `/props` or the running container suggests reasoning is enabled but the wrapper is not forcing thinking on globally, `quality-test.sh` / `bench.sh` print a warning; pack defaults still apply, and `--enable-thinking` forces every pack on. `--thinking-max-tokens` now passes through independently and only affects packs whose thinking gate resolves on. The default is 16K; hard LiveCodeBench items may still exhaust that budget, so compare with `benchlocal-cli run --reasoning --no-thinking` when diagnosing budget runaway.
 
+#### Bounding runaway reasoning — `--thinking-budget N` (opt-in, [#1383](https://github.com/noonghunna/club-3090/issues/1383))
+
+A thinking model can reason until the per-case wall clock: on a MiMo-V2.6-9B thinking-on 8-pack, 2 of the
+first 7 scenarios hit the 900 s cap and scored `timeout fail` — a harness artifact that lands in the score as
+a capability miss. `--thinking-budget N` bounds the *reasoning* at N tokens in whatever spelling the serving
+engine uses, and **verifies the budget can take effect before running**. It is opt-in and never a default:
+every published BENCHMARKS row was measured unbounded, and a default would silently break comparability with
+all of them.
+
+| engine | server prerequisite (boot) | what the wrapper sends | how it verifies |
+|---|---|---|---|
+| llama.cpp | `--reasoning-budget N` — the shipped composes read `REASONING_BUDGET=N` | nothing (server-wide) | `docker inspect` of the serving container, resolving the flag's **value** through the container env. The composes always emit `--reasoning-budget "${REASONING_BUDGET:--1}"`, so a *present* flag with the env unset boots **unbounded (-1)** — presence proves nothing, the value must be exactly N. |
+| vLLM v0.29.0 | `--reasoning-parser <name>` | `thinking_token_budget: N` (via benchlocal's `--extra-body`) | the container command carries a parser — without one vLLM rejects the field per request, so every scenario would 400 |
+| SGLang v0.5.20 | `--enable-custom-logit-processor` | `custom_logit_processor` (the model-specific `ThinkingBudgetLogitProcessor` subclass, chosen from the server's reasoning parser: qwen3 / qwen3-thinking / glm45 / deepseek-r1) + `custom_params.thinking_budget` | `/server_info` readback first, container command second |
+
+Refusals are loud and carry the fix — a budget that is accepted and ignored is worse than none, because
+success is then indistinguishable from failure. Positive evidence that the budget would *not* take effect is
+never bypassed. When there is **no** evidence at all (no container, no readback) the wrapper refuses too;
+`THINKING_BUDGET_UNVERIFIED=1` runs anyway and labels the run unverified.
+
+Two things the flag does that a bare engine flag does not:
+
+1. **The matched client cap.** A reasoning cap alone *relocates* the overrun: with `--reasoning-budget 8192`
+   and no total cap, one request still reached 13,238 tokens — reasoning stopped at 8192 and the model
+   rambled on in content. The wrapper derives `--thinking-max-tokens` = N + `THINKING_BUDGET_HEADROOM`
+   (default 4096) unless you set one *above* N; a cap at or below N is refused (no answer headroom). Note
+   that `--thinking-max-tokens` overrides `--max-tokens` on thinking-enabled packs, so `--max-tokens` alone
+   never caps them.
+2. **Per pack class.** `hermesagent-20` and `aider-polyglot-30` make their model calls from an agent *inside*
+   the sandbox. A server-wide budget (llama.cpp) governs those calls for free; a per-request budget (vLLM /
+   SGLang) never crosses the sandbox protocol, so those packs would run unbounded while every other pack was
+   bounded. On vLLM / SGLang a selection that includes them is refused — drop them (`--no-sandboxed`, or
+   `--pack <id>` per pack) or serve on llama.cpp.
+
+```bash
+# llama.cpp: the budget is a BOOT flag — set it, reboot, then run
+REASONING_BUDGET=8192 bash scripts/switch.sh --force <slug>
+bash scripts/quality-test.sh --full --enable-thinking --sampling-from-server --thinking-budget 8192
+#   → verifies the container resolves --reasoning-budget 8192, caps at 12288 total,
+#     hermesagent-20 governed by the boot flag
+
+# vLLM: per-request — needs --reasoning-parser at boot; the in-sandbox agentic packs must be out
+bash scripts/quality-test.sh --full --no-sandboxed --enable-thinking --thinking-budget 8192
+```
+
+Reading a bounded run: a capped scenario still fails — as `token_limit` rather than `timeout` — so the budget
+bounds cost and makes wall-time estimable; it does not rescue a score. The latency distribution under a budget
+is bimodal (either well under the cap or pinned exactly at it), which is itself a diagnostic that the
+unbounded run destroys. Reporting `token_limit` / `timeout` apart from `verifier_fail` is
+noonghunna/benchlocal-cli#148.
+
 **Why it matters:** a reasoning / exploratory fine-tune (e.g. Qwopus3.6, whose author recommends temp 0.75–1) is *under-represented* at temp 0 or with thinking disabled — greedy, thinking-off decoding collapses the path-exploration the fine-tune was trained for. But high temp and reasoning also *hurt* deterministic packs (DataExtract / StructOutput want exact, repeatable output), so read **per-pack deltas**, not just the total — and keep canonical temp-0 thinking-off as the bar for any apples-to-apples ranking.
 
 ## Compose `Quality:` schema field
@@ -553,8 +604,11 @@ The line documents what the compose was tested on — **against which pack versi
 |---|---|
 | `thinking OFF / ON` | reasoning gate forced off/on for every pack (absent = pack defaults) |
 | `sampling=server` | `--sampling-from-server`: sampling inherited from the serving config (absent = canonical pack-default temp=0) |
+| `tp=N` | tensor-parallel size the scores were measured at (#1396) — from the engine's own startup dump; absent on llama.cpp and on results that predate it |
 | `validity=valid / CONTAMINATED` | #126 thinking-validity check: CONTAMINATED means a requested arm did not reason as asked — do not trust that leg |
 | `packs tc1.0.1·if1.0.0·…` | exact per-pack versions, compact ids (`tc`=toolcall-15, `if`=instructfollow-15, `so`=structoutput-15, `de`=dataextract-15, `rm`=reasonmath-15, `bf`=bugfind-15, `hm`=hermesagent-20, `cli`=cli-40) |
+
+**The rig and the sampling in effect are recorded with the results (#1396).** When the wrapper can see the serving container, `scripts/lib/run_context.py` reads what the engine *applied* — not the flags we passed it — and passes it to benchlocal-cli itself, as run metadata (plus the server's sampling defaults under `--sampling-from-server`). The results JSON gains `run_meta` + `server_defaults_source`, and the summary header and Results Card gain a `Rig:` line (engine, TP/PP, quant, KV, spec, max ctx, GPUs × model, power cap, PCIe, NVLink) and a `Sampling:` line. It reads the engine's post-processing log lines deliberately: vLLM silently drops `presence_penalty` from its generation-config override, and SGLang's preferred-sampling-params boot flag is inert on `/v1/chat/completions` (sglang#39096) — reporting either flag would record sampling that never ran. llama.cpp is untouched (benchlocal-cli reads `GET /props`). Needs a benchlocal-cli that accepts run metadata; an older one gets a one-line upgrade warning and the run proceeds unchanged.
 
 Never hand-write a `packs v1.0.x` wildcard — the eight packs span six distinct versions. For richer provenance (per-pack latency p50/p95, variance under `--repeat`, benchlocal-cli version), pass `--report md --report-out card.md` and link the generated Results Card v2 next to the Quality line.
 

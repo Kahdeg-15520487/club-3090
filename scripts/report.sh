@@ -7,12 +7,13 @@
 # issue or discussion.
 #
 # Usage:
-#   bash scripts/report.sh                   # default: hardware + stack + boot log highlights (~2 sec)
+#   bash scripts/report.sh                   # default: hardware + stack + settings + boot log highlights (~2 sec)
 #   bash scripts/report.sh --verify          # adds verify-full.sh output (~1-2 min)
 #   bash scripts/report.sh --stress          # adds verify-stress.sh 7/7 output (~5-10 min)
 #   bash scripts/report.sh --soak            # adds SOAK_MODE=continuous summary (~25 min) — catches Cliff 2b
 #   bash scripts/report.sh --bench           # adds bench.sh output (~3 min)
 #   bash scripts/report.sh --agentic         # adds bench-agentic.sh curve-shape output (~8 min estimate)
+#   bash scripts/report.sh --kv-agentic      # adds the agentic KV offload probe (#1419: real agent workload for the KV offload tier; needs a slug booted with KV_OFFLOAD_GB, ~15 min estimate on 2x 3090 dual-fast, RAM mode)
 #   bash scripts/report.sh --full            # ALL five: verify + stress + soak + bench + agentic (~43 min estimate, the canonical "everything" pass for cross-rig contributions)
 #   bash scripts/report.sh --studio          # adds AI Studio container log tails (ComfyUI + director + …) — for image/video/audio generation bugs (~2 sec)
 #   bash scripts/report.sh --engine-args     # adds the engine's FULL startup dump to the resolved-config section (~8 KB on SGLang)
@@ -56,6 +57,9 @@ DO_STRESS=0
 DO_SOAK=0
 DO_BENCH=0
 DO_AGENTIC=0
+# Opt-in like --studio: needs the slug booted with KV_OFFLOAD_GB, and it is deliberately
+# NOT folded into --full (a ~15 min agent workload with its own boot requirement).
+DO_KV_AGENTIC=0
 DO_STUDIO=0
 # club-3090#1265: the engine's own startup dump is ~8 KB on one line for SGLang,
 # and reports already bump against issue-body limits — so it is opt-in, and
@@ -82,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --soak) DO_SOAK=1; shift ;;
     --bench) DO_BENCH=1; shift ;;
     --agentic) DO_AGENTIC=1; shift ;;
+    --kv-agentic) DO_KV_AGENTIC=1; shift ;;
     --studio) DO_STUDIO=1; shift ;;
     --engine-args) DO_ENGINE_ARGS=1; shift ;;
     --full) DO_VERIFY=1; DO_STRESS=1; DO_SOAK=1; DO_BENCH=1; DO_AGENTIC=1; shift ;;
@@ -110,14 +115,22 @@ source "$REPO_ROOT/scripts/lib/report_calib.sh"
 # shellcheck source=lib/p2p-state.sh
 source "$REPO_ROOT/scripts/lib/p2p-state.sh"
 
-# Pick up a saved MODEL_DIR (and other config) from the repo .env — same as
-# launch.sh / switch.sh, and what setup.sh writes there. An explicit exported
-# MODEL_DIR still wins. This makes the Disk section report the user's real
-# models path instead of falling back to the hardcoded mount below.
-if [[ -z "${MODEL_DIR:-}" && -f "${REPO_ROOT}/.env" ]]; then
-  # shellcheck disable=SC1091
-  source "${REPO_ROOT}/.env"
+# Pick up a saved MODEL_DIR (and other settings) through the ONE loader, as
+# launch.sh / switch.sh do (club-3090#1466): your club-3090 config, then the repo
+# .env. An exported value still wins. This makes the Disk section report the
+# user's real models path instead of falling back to the hardcoded mount below.
+# shellcheck source=lib/club-config.sh
+source "${REPO_ROOT}/scripts/lib/club-config.sh"
+# The "Settings" section (#1466) is taken HERE, before club_config_load exports
+# every saved setting into this shell: after that, every key would read as coming
+# from "shell". It is printed further down, through redact(). The loader hides
+# every secret value itself, whatever --no-redact says.
+if SETTINGS_SECTION="$(python3 "${REPO_ROOT}/scripts/lib/club_config.py" settings-report --root "${REPO_ROOT}" 2>&1)"; then
+  :
+else
+  SETTINGS_SECTION="- _Settings could not be read: $(tail -n 1 <<<"$SETTINGS_SECTION")_"
 fi
+club_config_load "${REPO_ROOT}"
 
 HOST_SHORT="$(hostname -s 2>/dev/null || echo unknown)"
 USER_NAME="${USER:-$(whoami 2>/dev/null || echo unknown)}"
@@ -307,62 +320,19 @@ section "System"
 # This rig read 3200 MT/s both before and after a DIMM went missing, while real
 # STREAM Triad fell ~100 -> 59.9 GB/s (2026-08-07). The spec number is exactly
 # the one that cannot detect the problem; the measured one is the only witness.
-# Our own learnings already say "the bandwidth number must be MEASURED, not spec"
-# — this implements it.
 #
-# Cheap and honest: ~1.5 GB, a few hundred ms, skipped when RAM is tight or no
-# compiler exists, and it SAYS SO rather than omitting the line (a missing row
-# reads as "nothing to report"). Disable with REPORT_NO_BANDWIDTH=1.
+# The probe (scripts/lib/membw_probe.c, driven by scripts/lib/membw.sh) is built to
+# read the same on any rig: non-temporal stores on x86, one pinned thread per
+# physical core, a 1/4 - 1/2 - all-cores sweep, arrays >= 4x L3. The first probe here
+# read ~90 GB/s on an 8-channel EPYC that does ~160. With the DIMMs' channels and
+# speed from dmidecode ($1) it also prints the rated peak and the percentage.
+# A few seconds; skipped with a reason when no compiler or too little free memory
+# (a missing row reads as "nothing to report"). Disable with REPORT_NO_BANDWIDTH=1.
 _report_mem_bandwidth() {
   [[ "${REPORT_NO_BANDWIDTH:-0}" == "1" ]] && return 0
-  local cc=""
-  for c in cc gcc clang; do command -v "$c" >/dev/null 2>&1 && { cc="$c"; break; }; done
-  if [[ -z "$cc" ]]; then
-    echo "- **Memory bandwidth:** not measured (no C compiler) — install \`gcc\` for a STREAM Triad figure"
-    return 0
-  fi
-  local free_mb; free_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
-  if [[ -n "$free_mb" && "$free_mb" -lt 4096 ]]; then
-    echo "- **Memory bandwidth:** not measured (only ${free_mb} MiB available; probe needs ~1.5 GB)"
-    return 0
-  fi
-  local d; d="$(mktemp -d 2>/dev/null)" || return 0
-  cat > "$d/t.c" <<'CEOF'
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-#include <time.h>
-#define N (64L*1024*1024)          /* 3 x 512 MiB */
-static double *a,*b,*c; static int NT;
-static void *w(void *p){ long id=(long)p, lo=N*id/NT, hi=N*(id+1)/NT;
-  for(long i=lo;i<hi;i++) c[i]=a[i]+3.0*b[i]; return 0; }
-int main(int argc,char**argv){
-  NT=atoi(argv[1]); if(NT<1)NT=1;
-  a=malloc(N*8); b=malloc(N*8); c=malloc(N*8);
-  if(!a||!b||!c){ printf("0\n"); return 1; }
-  for(long i=0;i<N;i++){a[i]=1.0;b[i]=2.0;c[i]=0.0;}
-  double best=0; pthread_t th[512];
-  for(int r=0;r<3;r++){
-    struct timespec s,e; clock_gettime(CLOCK_MONOTONIC,&s);
-    for(long i=0;i<NT;i++) pthread_create(&th[i],0,w,(void*)i);
-    for(long i=0;i<NT;i++) pthread_join(th[i],0);
-    clock_gettime(CLOCK_MONOTONIC,&e);
-    double dt=(e.tv_sec-s.tv_sec)+(e.tv_nsec-s.tv_nsec)/1e9;
-    double gbs=(3.0*N*8)/dt/1e9; if(gbs>best) best=gbs;
-  }
-  printf("%.1f\n",best); return 0;
-}
-CEOF
-  local gbs=""
-  if "$cc" -O2 -o "$d/t" "$d/t.c" -lpthread >/dev/null 2>&1; then
-    gbs="$("$d/t" "$(nproc 2>/dev/null || echo 4)" 2>/dev/null)"
-  fi
-  rm -rf "$d"
-  if [[ -n "$gbs" && "$gbs" != "0" ]]; then
-    echo "- **Memory bandwidth (measured):** ${gbs} GB/s STREAM Triad — *this*, not the rated MT/s above, is what sets CPU-offload decode throughput"
-  else
-    echo "- **Memory bandwidth:** probe failed to build/run — rated speed above is NOT a substitute"
-  fi
+  # shellcheck source=lib/membw.sh
+  source "${REPO_ROOT}/scripts/lib/membw.sh"
+  club_membw_lines "${1:-}"
 }
 
 # ---------------------------------------------------------------------------
@@ -466,7 +436,7 @@ section "CPU + RAM"
         if (nfull < nch)
           print "  - ⚠️ _An unpopulated channel forces a coarser interleave. Measured on this stack: losing ONE of eight channels cost ~**30% of bandwidth** (~100 → 69.8 GB/s idle; 59.9 under load) — 2.4× worse than the 12.5% a naive share implies._"
       }'
-    _report_mem_bandwidth
+    _report_mem_bandwidth "$_dmi"
   elif have dmidecode; then
     echo "- **Memory config:** not collected (needs root) — run \`sudo dmidecode -t memory\` for DIMM count / size / configured speed"
     _report_mem_bandwidth
@@ -874,6 +844,17 @@ section "Stack version"
 } | redact
 
 # ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+# Every configured setting, its effective value and where it comes from — the
+# same view as `bash scripts/settings.sh show` (#1466). Taken at the top, before
+# club_config_load; secret values were already hidden by the loader, and redact()
+# scrubs paths, host and user here exactly as in every other section.
+
+section "Settings"
+printf '%s\n' "$SETTINGS_SECTION" | redact
+
+# ---------------------------------------------------------------------------
 # Profile state
 # ---------------------------------------------------------------------------
 
@@ -1052,9 +1033,9 @@ if [[ -z "$CONTAINER" ]] && have docker && docker info >/dev/null 2>&1; then
 fi
 
 # Engine class — drives which probes run inside the container body. Inferred
-# from container name; user can override with ENGINE_KIND=vllm|llamacpp env var.
+# from container name; user can override with ENGINE_KIND=<engine-family> env var.
 case "${ENGINE_KIND:-}" in
-  vllm|llamacpp|sglang|unknown) ;;  # respect user override (sglang: club-3090#1261)
+  vllm|llamacpp|sglang|exllamav3|unknown) ;;  # respect user override (sglang: club-3090#1261)
   *)
     # Prefix arms live in scripts/lib/engine-kind.sh (club-3090#1282).
     ENGINE_KIND="$(engine_kind_from_container "$CONTAINER")"
@@ -1188,40 +1169,34 @@ else
     # guess whether P2P was engaged (the gap that forced asks on #446 / #488).
     # Displayed to the user AND fed to the classifier. head -8 would drop the
     # STATE line on a restarted container (several boots of trail in one log),
-    # silently downgrading classification to the legacy prose path; keep the
-    # last 8 so the current boot's record survives (#1332 review).
-    nvlink_boot=$(docker logs "$CONTAINER" 2>&1 | command grep -E '\[nvlink\]' | tail -8)
-    p2p_env=$(docker exec "$CONTAINER" env 2>/dev/null | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)
-    # vLLM's runtime custom-AR veto (world>2 without NVLink — its gate never
-    # consults peer access). Fed to the classifier so the verdict can't claim
-    # "custom all-reduce ON" that vLLM already vetoed (#786).
-    # ⚠️ NO -m1: the classifier needs the CURRENT boot's veto, and -m1 returns the
-    # FIRST in the log, which after a restart belongs to an earlier boot (#1332).
-    vllm_ar_gate=$(docker logs "$CONTAINER" 2>&1 | command grep -E 'Custom allreduce is disabled|disable_custom_all_reduce=True' || true)
+    # silently downgrading classification to the legacy prose path. The shared
+    # normalizer also emits a compact SGLang BOOT marker for the same isolation.
+    _p2p_class_stream="$(docker logs "$CONTAINER" 2>&1 | p2p_engine_log_evidence || true)"
+    nvlink_boot="$(printf '%s\n' "$_p2p_class_stream" | command grep -F '[nvlink]' | tail -8)"
+    p2p_env="$(docker exec "$CONTAINER" env 2>/dev/null | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)"
+    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:|Setup Custom allreduce failed| cuda graph addresses' || true)"
     echo "**Interconnect / P2P engagement:**"
-    if [[ -n "$nvlink_boot" || -n "$p2p_env" || -n "$vllm_ar_gate" ]]; then
+    if [[ -n "$nvlink_boot" || -n "$p2p_env" || -n "$engine_ar_runtime" ]]; then
       echo '```'
       [[ -n "$nvlink_boot" ]] && echo "$nvlink_boot"
-      [[ -n "$vllm_ar_gate" ]] && { echo "# vLLM runtime:"; echo "$vllm_ar_gate"; }
+      [[ -n "$engine_ar_runtime" ]] && { echo "# engine runtime:"; echo "$engine_ar_runtime"; }
       [[ -n "$p2p_env" ]] && { echo "# resolved container env:"; echo "$p2p_env"; }
       echo '```'
     else
-      echo "_No \`[nvlink]\` boot line or NCCL_P2P/NVLINK_MODE env found — P2P engagement undetermined (single-GPU, a non-NCCL engine like llama.cpp, or an entrypoint predating detect_nvlink.sh)._"
+      echo "_No \`[nvlink]\` boot line, engine all-reduce line, or NCCL_P2P/NVLINK_MODE env found — P2P engagement undetermined (single-GPU, a non-NCCL engine like llama.cpp, or an entrypoint predating detect_nvlink.sh)._"
     fi
     # Cross-referenced VERDICT (capability x engagement — the #488/#158 matrix).
     # Silent on single-GPU / no-capability rigs so the OK/WARN/INFO line is
-    # always signal, never boilerplate.
-    # ⚠️ ONE ORDERED STREAM, not the display variables reassembled. Those are
-    # gathered separately (trail, then every veto, then env), so a veto from an
-    # EARLIER boot lands after the current boot's STATE line and the epoch slice
-    # is defeated — it condemns a healthy boot, or clears a broken one. Removing
-    # `grep -m1` above made that strictly worse by feeding every boot's vetoes.
-    # The display vars stay as they are; classification reads the log in order.
-    _p2p_class_stream="$(docker logs "$CONTAINER" 2>&1 \
-      | command grep -E '\[nvlink\]|Custom allreduce is disabled|disable_custom_all_reduce=True' || true)"
-    _p2p_verdict_line="$(p2p_verdict "$(p2p_gpu_count)" "$(p2p_host_capability)" \
-      "$(printf '%s\n%s' "$_p2p_class_stream" "$p2p_env" | p2p_classify_engagement)")"
-    [[ -n "$_p2p_verdict_line" ]] && { echo; echo "**Interconnect verdict:** ${_p2p_verdict_line}"; }
+    # always signal, never boilerplate. The normalized stream remains ordered,
+    # so the classifier can isolate the current vLLM or SGLang boot.
+    if [[ "$ENGINE_KIND" == "exllamav3" ]]; then
+      echo
+      echo "**Interconnect verdict:** ℹ driver P2P capability is reported above; ExLlamaV3 layer-split transport does not use NCCL/custom all-reduce, so the shared engagement verdict is not applicable."
+    else
+      _p2p_verdict_line="$(p2p_verdict "$(p2p_gpu_count)" "$(p2p_host_capability)" \
+        "$(printf '%s\n%s' "$_p2p_class_stream" "$p2p_env" | p2p_classify_engagement)")"
+      [[ -n "$_p2p_verdict_line" ]] && { echo; echo "**Interconnect verdict:** ${_p2p_verdict_line}"; }
+    fi
     # Kernel-module flavor — the WHY behind a P2P result on GeForce cards. A
     # proprietary (closed) module refuses P2P; the open modules can grant it, with
     # `topo -p2p rw` above the functional proof. Only meaningful multi-GPU.
@@ -1563,13 +1538,14 @@ stage_label() {
     soak)    echo "soak-test.sh" ;;
     bench)   echo "bench.sh" ;;
     agentic) echo "bench-agentic.sh" ;;
+    kv_agentic) echo "kv-offload-agentic-probe.py" ;;
     *)       echo "$1" ;;
   esac
 }
 
 # Resolve the engine endpoint the same way preflight.sh / soak-test.sh do: by
 # the container's ENGINE-INTERNAL port mapping (vLLM 8000 / llama.cpp 8080 /
-# sglang 30000), never a model-name allowlist. Mirrors, rather than sources,
+# sglang 30000 / TabbyAPI 5000), never a model-name allowlist. Mirrors, rather than sources,
 # preflight.sh — that file executes checks at source time.
 resolve_stage_endpoint() {
   if [[ -n "${URL:-}" ]]; then printf '%s\n' "${URL%/}"; return 0; fi
@@ -1577,7 +1553,7 @@ resolve_stage_endpoint() {
   have docker || return 0
   [[ -n "$CONTAINER" ]] || return 0
   local internal mapped port
-  for internal in 8000 8080 30000; do
+  for internal in 8000 8080 30000 5000; do   # 5000 = TabbyAPI (exllamav3), #1360
     mapped="$(docker port "$CONTAINER" "${internal}/tcp" 2>/dev/null | head -1 || true)"
     if [[ -n "$mapped" ]]; then
       port="${mapped##*:}"
@@ -1735,6 +1711,20 @@ if [[ $DO_AGENTIC -eq 1 ]]; then
   fi
 fi
 
+# KV-offload agentic probe (--kv-agentic, #1419) — the "real agent workload with the tier on":
+# several long agentic conversations switched between, evicted, then proven to come back warm
+# from the tier. The slug must be booted with KV_OFFLOAD_GB for this to mean anything; without
+# the tier on, expect FAIL — that IS the signal the tier is off.
+if [[ $DO_KV_AGENTIC -eq 1 ]]; then
+  section "kv-offload-agentic-probe output"
+  if [[ ! -f scripts/kv-offload-agentic-probe.py ]]; then
+    echo "_scripts/kv-offload-agentic-probe.py not found_"
+  elif stage_guard kv_agentic; then
+    python3 scripts/kv-offload-agentic-probe.py 2>&1 | tee "${STAGE_RAW_DIR}/kv_agentic" | redact | details "agentic KV offload probe (3 conversations x 15 turns, switched between, RAM mode; ~15 min on 2x 3090 dual-fast)"
+    stage_record kv_agentic "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/kv_agentic"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # AI Studio container logs (--studio) — opt-in: the ComfyUI / director / orchestrator
 # log tails that diagnose an image/video/audio GENERATION failure (e.g. a "ComfyUI
@@ -1826,7 +1816,7 @@ cat <<'EOF'
 
 ---
 
-_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only). Exit code: 0 all-clear · 2 advisory-only · 1 hard failure._
+_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--kv-agentic` (real agent workload for the KV offload tier — needs a slug booted with KV_OFFLOAD_GB, ~15 min estimate on 2x 3090 dual-fast, RAM mode), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only). Exit code: 0 all-clear · 2 advisory-only · 1 hard failure._
 EOF
 
 exit "$STAGE_WORST"

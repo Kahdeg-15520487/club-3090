@@ -4,6 +4,8 @@
 #
 #   bash scripts/setup.sh                # interactive model picker in a TTY
 #   bash scripts/setup.sh <model-name>   # scripted/CI positional form
+#   bash scripts/setup.sh <slug>         # everything one launch slug needs: its weights
+#                                        # + its drafter / vision projector companions
 #
 # Supported model families are DERIVED from scripts/lib/profiles/models/*.yml
 # (via weights.py `catalog --json`) — never hand-listed here. Exact repositories,
@@ -142,6 +144,7 @@ for _m in list(RECOMMENDED_DEFAULT_MODELS)[:2]:
 
 usage() {
   echo "Usage: $0 <model-name>"
+  echo "       $0 <slug>       # a launch slug's weights + its drafter / projector companions"
   echo "       $0              # interactive model picker in a TTY"
   echo ""
   echo "Run with no model name in a normal terminal to open the hardware-aware"
@@ -154,6 +157,7 @@ usage() {
   done < <(_catalog_py "[m['id'] for m in data['models']]")
   echo ""
   echo "Exact catalog entry fetch: WEIGHT_KEY=<registry-key> $0 <model-name>"
+  echo "Slug fetch without its companions: WEIGHT_EXTRA_KEYS= $0 <slug>"
   echo ""
   # These are OPTIONAL downloads, and a slug that needs one fails at switch.sh
   # time with the engine's own error — which names neither the flag nor the way
@@ -234,8 +238,8 @@ _picker_hw_mark() {
   printf '%s' "${status}"
 }
 
-model_picker_line() { # <idx> <model> <size-text> <compose-paths>
-  local idx="$1" model="$2" size="$3" paths="$4" status mark reason
+model_picker_line() { # <idx> <model> <label> <size-text> <compose-paths>
+  local idx="$1" model="$2" label="$3" size="$4" paths="$5" status mark reason
   status="$(_picker_hw_mark "$model" "$paths")"
   reason="${status#*|}"
   if [[ "$status" == ok\|* ]]; then
@@ -243,22 +247,39 @@ model_picker_line() { # <idx> <model> <size-text> <compose-paths>
   else
     mark="✗"
   fi
-  printf "  %s. %-14s (%s)  %s %s\n" "$idx" "$(model_label "$model")" "$size" "$mark" "$reason"
+  printf "  %s. %-14s (%s)  %s %s\n" "$idx" "$label" "$size" "$mark" "$reason"
 }
 
 pick_model_interactive() {
   # shellcheck source=lib/compose-meta.sh
   source "${ROOT_DIR}/scripts/lib/compose-meta.sh"
+  # shellcheck source=lib/registry-lookup.sh
+  source "${ROOT_DIR}/scripts/lib/registry-lookup.sh"
+  REGISTRY_LOOKUP_ROOT="${ROOT_DIR}"
 
-  local -a _ids _both=()
-  mapfile -t _ids < <(_catalog_py "[m['id'] for m in data['models']]")
+  # ⚠️ Every picker line renders in a $( ) subshell, and a memo set inside one
+  # dies with it — so each line used to re-run weights.py (twice), nvidia-smi,
+  # and the registry lookups paid a second full emit (#1382). Resolve each input
+  # ONCE here, in the shell those subshells fork from, and they inherit it.
+  compose_hw_detect_gpus >/dev/null 2>&1 || true   # primes _COMPOSE_HW_GPU_CACHE
+  # One catalog read for every row: id, label, default-weights size.
+  local -a _ids _labels _sizes _both=()
+  local _row_id _row_label _row_size
+  while IFS=$'\x1f' read -r _row_id _row_label _row_size; do
+    [[ -n "${_row_id}" ]] || continue
+    _ids+=("${_row_id}")
+    _labels+=("${_row_label}")
+    _sizes+=("${_row_size}")
+  done < <(_catalog_py "[chr(31).join([m['id'], m.get('display_name') or m['id'], str(m.get('size_gb'))]) for m in data['models']]")
   read_both_models _both
 
   # Registry-derived compose paths per model, for the hw-fit fallback above.
-  local _reg_tmp _reg_pick_json="" ; _reg_tmp="$(mktemp)"
-  bash "${ROOT_DIR}/scripts/lib/registry-emit.sh" --json >"${_reg_tmp}" 2>/dev/null && _reg_pick_json=1
+  # ONE registry emit, into registry-lookup's per-process cache, so the
+  # compose_hw_model_status lookups below reuse it instead of emitting again.
+  local _reg_json=""
+  registry_lookup_cache_path 2>/dev/null && _reg_json="${_registry_lookup_cache}"
   local -A _model_composes=()
-  if [[ -n "${_reg_pick_json}" ]]; then
+  if [[ -n "${_reg_json}" ]]; then
     eval "$(python3 -c '
 import json, shlex, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -276,19 +297,21 @@ for v in data.get("variants", []):
 sep = " "
 for m in order:
     print(f"_model_composes[{shlex.quote(m)}]={shlex.quote(sep.join(acc[m]))}")
-' "${_reg_tmp}")"
+' "${_reg_json}")"
   fi
-  rm -f "${_reg_tmp}"
 
   echo "[setup] Which model to download?" >&2
   echo "" >&2
-  local _idx=0 _id _size _both_idx=""
-  for _id in "${_ids[@]}"; do
+  local _idx=0 _i _id _both_idx=""
+  for _i in "${!_ids[@]}"; do
     _idx=$((_idx + 1))
-    # Size of the model's default weight variant, straight from the catalog.
-    _size="$(_catalog_py "str(next((m.get('size_gb') for m in data['models'] if m['id'] == sys.argv[2]), '?'))" "${_id}")"
-    model_picker_line "$_idx" "${_id}" "~${_size} GB default weights" "${_model_composes[${_id}]:-}" >&2
+    _id="${_ids[${_i}]}"
+    # Label + size of the model's default weight variant, from the one catalog read above.
+    model_picker_line "$_idx" "${_id}" "${_labels[${_i}]}" "~${_sizes[${_i}]} GB default weights" "${_model_composes[${_id}]:-}" >&2
   done
+  # The registry was only needed to render the list; don't strand the cache
+  # file for the rest of a (possibly hours-long) download run.
+  registry_lookup_cleanup
   if ((${#_both[@]} >= 2)); then
     _idx=$((_idx + 1))
     _both_idx="${_idx}"
@@ -327,6 +350,7 @@ esac
 if [[ $# -gt 1 ]]; then
   echo "ERROR: setup.sh takes a single model name; got extra argument(s): ${*:2}" >&2
   echo "       setup.sh only DOWNLOADS WEIGHTS for a model — e.g. bash scripts/setup.sh ${1}" >&2
+  [[ "${2:-}" == */* ]] && echo "       To download everything a slug needs instead: bash scripts/setup.sh ${2}" >&2
   echo "       To LAUNCH a serving config (a slug such as 'vllm/gemma-31b-dual'), use:" >&2
   echo "         bash scripts/launch.sh --variant <slug>      # or: bash scripts/switch.sh <slug>" >&2
   echo "       See the slugs available for a model:  bash scripts/switch.sh --list" >&2
@@ -343,6 +367,52 @@ if [[ -z "${MODEL_NAME}" ]]; then
     echo "(Interactive picker available in a TTY shell. Use the positional form in scripts/CI.)"
     exit 1
   fi
+fi
+
+# ---------- Slug form: everything one launch slug needs ----------
+# `setup.sh <slug>` (any argument with a '/', e.g. llamacpp/qwen38-27b-single-iq4xs)
+# resolves the slug through the registry: its model, its weights variant, and its
+# `weights_companions` (a drafter or vision projector its compose mounts). Before
+# this, only the serve-cockpit's Download action knew a slug's companions, so a CLI
+# download could leave a slug that crash-loops on a missing drafter (#1247). These
+# are the same keys the cockpit builds (services.py run_weights_download).
+# Every declared companion is fetched: all drafters are default-ON, and every
+# projector is mounted unconditionally except GLM's, which is ~1 GB next to
+# 114-157 GB of weights. Explicit WEIGHT_KEY / WEIGHT_EXTRA_KEYS still win, so
+# `WEIGHT_EXTRA_KEYS= bash scripts/setup.sh <slug>` skips the companions.
+SETUP_SLUG=""
+if [[ "${MODEL_NAME}" == */* ]]; then
+  SETUP_SLUG="${MODEL_NAME}"
+  _slug_rc=0
+  _slug_env="$(CLUB3090_PROFILES_DIR="${ROOT_DIR}/scripts/lib/profiles" python3 -c '
+import os, shlex, sys
+sys.path.insert(0, os.environ["CLUB3090_PROFILES_DIR"])
+from compose_registry import get_registry
+e = get_registry().get(sys.argv[1])
+if e is None:
+    raise SystemExit(3)
+model, variant = e["model"], e["weights_variant"]
+comps = [c if ":" in c else f"{model}:{c}" for c in (e.get("weights_companions") or []) if c]
+print("_slug_model=" + shlex.quote(model))
+print("_slug_key=" + shlex.quote(model + ":" + variant))
+print("_slug_companions=" + shlex.quote(" ".join(comps)))
+print("_slug_status=" + shlex.quote(str(e.get("status") or "?")))
+' "${SETUP_SLUG}")" || _slug_rc=$?
+  if [[ "${_slug_rc}" == "3" ]]; then
+    echo "ERROR: '${SETUP_SLUG}' is not a model name or a known launch slug." >&2
+    echo "       Model names: $(_catalog_py "[', '.join(m['id'] for m in data['models'])]")" >&2
+    echo "       Launch slugs: bash scripts/switch.sh --list" >&2
+    exit 1
+  elif [[ "${_slug_rc}" != "0" ]]; then
+    echo "ERROR: could not read the launch-slug registry to resolve '${SETUP_SLUG}'." >&2
+    echo "       Install python3-yaml/PyYAML if missing, or run: python3 scripts/lib/profiles/migrate_registry_to_yaml.py --check" >&2
+    exit 1
+  fi
+  eval "${_slug_env}"
+  MODEL_NAME="${_slug_model}"
+  : "${WEIGHT_KEY:=${_slug_key}}"
+  [[ -n "${WEIGHT_EXTRA_KEYS+x}" ]] || WEIGHT_EXTRA_KEYS="${_slug_companions}"
+  echo "[slug]    ${SETUP_SLUG} (${_slug_status}) -> ${WEIGHT_KEY}${WEIGHT_EXTRA_KEYS:+ + ${WEIGHT_EXTRA_KEYS}}"
 fi
 
 declare -a BOTH_MODELS=()
@@ -465,6 +535,28 @@ if [[ "${WITH_ASSISTANT_DRAFT:-0}" == "1" ]]; then
   ALWAYS_DRAFT_KEY="${MODEL_NAME}:${SETUP_ASSISTANT_DRAFT}"
 fi
 
+# ---------- Companion artifacts (cockpit Download, setup.sh <slug>) ----------
+# A slug's `weights_companions` (a drafter / mmproj vision projector its compose
+# mounts from a separate subdir) arrive as a space/comma-separated WEIGHT_EXTRA_KEYS
+# list of fully-qualified <model>:<variant> keys: from the serve-cockpit Download
+# action, or from the slug form above.  Fetch them ALONGSIDE the core so a
+# downloaded slug actually serves — otherwise it reads "present" then fails to boot
+# for the missing companion.  Each is a normal catalog entry pulled by the
+# EXTRA_WEIGHT_KEYS loop below (after the SKIP_MODEL guard), with its own SHA verify.
+# Queued HERE, before the dump, so SETUP_DUMP_KEYS shows exactly what would download.
+_COMPANION_KEYS=()
+if [[ -n "${WEIGHT_EXTRA_KEYS:-}" ]]; then
+  read -ra _COMPANION_KEYS <<< "${WEIGHT_EXTRA_KEYS//,/ }"
+  for _ck in "${_COMPANION_KEYS[@]}"; do
+    [[ -n "${_ck}" ]] || continue
+    # A companion can also be the primary or the model's always-fetched drafter
+    # (GLM's dflash2-q4km is both): queue it once, or the disk estimate counts it twice.
+    [[ "${_ck}" == "${PRIMARY_WEIGHT_KEY}" || "${_ck}" == "${ALWAYS_DRAFT_KEY:-}" ]] && continue
+    [[ " ${EXTRA_WEIGHT_KEYS[*]:-} " == *" ${_ck} "* ]] && continue
+    EXTRA_WEIGHT_KEYS+=("${_ck}")
+  done
+fi
+
 # Debug / CI surface: print the resolved dispatch keys and exit before any
 # preflight or download. Used by scripts/tests/test-setup-registry-derived.sh
 # to assert setup.sh's derived keys agree with `weights.py catalog --json` for
@@ -478,41 +570,53 @@ if [[ "${SETUP_DUMP_KEYS:-0}" == "1" ]]; then
   echo "vision=${VISION_KEY}"
   echo "prism_eagle3=${PRISM_EAGLE3_KEY}"
   echo "extras=${EXTRA_WEIGHT_KEYS[*]:-}"
+  echo "slug=${SETUP_SLUG}"
+  echo "companions=${WEIGHT_EXTRA_KEYS:-}"
   exit 0
 fi
 
 load_weight_recipe "${PRIMARY_WEIGHT_KEY}"
 
-# ---------- Companion artifacts (cockpit Download) ----------
-# The serve-cockpit Download action reads the slug's `weights_companions` from the
-# registry (a DFlash draft model / mmproj vision projector its compose mounts from
-# a separate subdir) and passes them as a space/comma-separated WEIGHT_EXTRA_KEYS
-# list of fully-qualified <model>:<variant> keys.  Fetch them ALONGSIDE the core
-# so a downloaded slug actually serves — otherwise it reads "present" then fails
-# to boot for the missing companion.  Each is a normal catalog entry pulled by the
-# EXTRA_WEIGHT_KEYS loop below (after the SKIP_MODEL guard), with its own SHA verify.
-if [[ -n "${WEIGHT_EXTRA_KEYS:-}" ]]; then
-  read -ra _COMPANION_KEYS <<< "${WEIGHT_EXTRA_KEYS//,/ }"
-  for _ck in "${_COMPANION_KEYS[@]}"; do
-    [[ -n "${_ck}" ]] && EXTRA_WEIGHT_KEYS+=("${_ck}")
-  done
-  [[ -n "${_COMPANION_KEYS[*]:-}" ]] && echo "[model]   + companion(s): ${_COMPANION_KEYS[*]}"
-fi
+# Companions were queued above, before the SETUP_DUMP_KEYS surface.
+[[ -n "${_COMPANION_KEYS[*]:-}" ]] && echo "[model]   + companion(s): ${_COMPANION_KEYS[*]}"
 
 # ---------- MODEL_DIR resolution ----------
 # Order of precedence:
 #   1. MODEL_DIR already exported in the calling shell  → use as-is
-#   2. .env at repo root sets MODEL_DIR                  → source it
+#   2. saved settings set MODEL_DIR (club3090.env, or the legacy repo .env) → use it
 #   3. Interactive prompt (only if stdin is a TTY)       → ask user
 #   4. Silent fallback to <repo>/models-cache            → in-repo default
 #
 # The prompt only fires for fresh users on a TTY who haven't set anything.
 # CI / scripted runs (no TTY) get the silent fallback, preserving prior behavior.
 
-# Step 2: source repo-root .env if present (lets a saved choice persist)
-if [[ -z "${MODEL_DIR:-}" && -f "${ROOT_DIR}/.env" ]]; then
-  # shellcheck source=/dev/null
-  set -a; source "${ROOT_DIR}/.env"; set +a
+# Step 2: load saved settings (lets a saved choice persist) through the ONE
+# loader (club-3090#1466): your club-3090 config, then the repo .env. An exported
+# value still wins.
+# shellcheck source=lib/club-config.sh
+source "${ROOT_DIR}/scripts/lib/club-config.sh"
+club_config_load "${ROOT_DIR}"
+
+# An older install keeps its settings in the repo .env (and its gateway routes/keys in
+# services/litellm). They keep working; re-running setup after a pull is the natural
+# moment to offer the move to ~/.config/club-3090 (#1466). A copy — the repo files stay.
+# Offered only where the copy can land (a config dir that exists or can be created);
+# end of input (Ctrl-D, a scripted run) counts as "no", never as a setup failure.
+if [[ -t 0 && -t 1 ]] && mkdir -p "$(club_config_dir)" 2>/dev/null; then
+  _pending="$(club_config_migrate_pending "${ROOT_DIR}")"
+  if [[ -n "$_pending" ]]; then
+    echo ""
+    echo "Your settings still live in this checkout (${_pending})."
+    echo "  Copying them to $(club_config_dir)/ lets every checkout and worktree share them; the repo files stay as they are."
+    read -rp "Copy them now? [Y/n]: " _ans || _ans=n
+    if [[ ! "${_ans:-}" =~ ^[Nn] ]]; then
+      bash "${ROOT_DIR}/scripts/settings.sh" migrate || echo "  → migrate failed; your settings still work from the checkout." >&2
+    else
+      echo "  → left as they are. Any time: bash scripts/settings.sh migrate --dry-run"
+    fi
+  fi
+else
+  club_config_migrate_notice "${ROOT_DIR}" "[setup]"
 fi
 
 # Step 3: prompt if still unset + interactive
@@ -544,20 +648,19 @@ if [[ -z "${MODEL_DIR:-}" && -t 0 && -t 1 ]]; then
   done
   echo ""
 
-  # Offer to persist the choice so future runs skip the prompt
-  read -rp "Save MODEL_DIR=${MODEL_DIR} to .env so we skip this next time? [Y/n]: " save
+  # Offer to persist the choice so future runs skip the prompt. Saved through the ONE
+  # writer (club-3090#1466) in your club-3090 settings, which every checkout reads —
+  # not in this checkout's .env. The writer refuses a value that bash, docker compose
+  # and systemd would read differently (quotes, `$`, backslashes, ` #`) and says why;
+  # this run still uses the path, it just isn't saved.
+  read -rp "Save MODEL_DIR=${MODEL_DIR} to your club-3090 settings ($(club_config_dir)/club3090.env) so we skip this next time? [Y/n]: " save
   if [[ "${save:-y}" =~ ^[Yy]$ || -z "${save:-}" ]]; then
-    if [[ -f "${ROOT_DIR}/.env" ]]; then
-      # Update existing .env (replace MODEL_DIR= line if present, else append)
-      if grep -qE "^MODEL_DIR=" "${ROOT_DIR}/.env"; then
-        sed -i "s|^MODEL_DIR=.*|MODEL_DIR=${MODEL_DIR}|" "${ROOT_DIR}/.env"
-      else
-        echo "MODEL_DIR=${MODEL_DIR}" >> "${ROOT_DIR}/.env"
-      fi
+    if _saved="$(club_config_set "MODEL_DIR=${MODEL_DIR}" 2>&1)"; then
+      echo "  → saved to $(club_config_dir)/club3090.env (every checkout reads it; an exported MODEL_DIR still wins)."
     else
-      echo "MODEL_DIR=${MODEL_DIR}" > "${ROOT_DIR}/.env"
+      echo "  → NOT saved: $(printf '%s\n' "$_saved" | tail -n 1)" >&2
+      echo "    Using ${MODEL_DIR} for this run only; set MODEL_DIR=... when re-running, or you'll get this prompt again." >&2
     fi
-    echo "  → saved. (.env is gitignored.)"
   else
     echo "  → not saved. Set MODEL_DIR=... when re-running, or you'll get this prompt again."
   fi
@@ -646,7 +749,7 @@ _disk_need_gb() {
   fi
 }
 
-_DISK_KEYS=("${PRIMARY_WEIGHT_KEY:-}" "${ALWAYS_DRAFT_KEY:-}")
+_DISK_KEYS=("${PRIMARY_WEIGHT_KEY:-}" "${ALWAYS_DRAFT_KEY:-}" "${EXTRA_WEIGHT_KEYS[@]}")
 [[ "${WITH_DFLASH_DRAFT:-0}" == "1" ]] && _DISK_KEYS+=("${DFLASH_KEY:-${MODEL_NAME}:dflash}")
 # WITH_VISION=1 opts into the mmproj projector (disk-gate it AND queue the download).
 [[ "${WITH_VISION:-0}" == "1" && -n "${VISION_KEY:-}" ]] && { _DISK_KEYS+=("${VISION_KEY}"); EXTRA_WEIGHT_KEYS+=("${VISION_KEY}"); }
@@ -665,39 +768,67 @@ preflight_hf_token  # soft-warn only; downloads will surface the hard failure
 echo "[preflight] ok."
 echo ""
 
-# ---------- WSL2 detection — auto-configure .env for known WSL2 boot crash ----------
+# ---------- WSL2 detection — save the known WSL2 boot-crash workaround ----------
 # WSL2 + driver 596.36 + vLLM nightly hit a `gptq_marlin_repack` boot crash
 # with `cudaErrorNotReady`. Workaround is `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`
 # (PR #84). The compose default is `expandable_segments:True,max_split_size_mb:512`
-# which works on bare-metal Linux but fails on WSL2 — so we auto-create a .env
-# override here on detected WSL2 systems. Cross-rig validated by @timxx (issue #60),
+# which works on bare-metal Linux but fails on WSL2 — so we save an override
+# here on detected WSL2 systems. Cross-rig validated by @timxx (issue #60),
 # @easel, and others. Safe no-op on bare-metal (only runs when /proc/version
-# contains "microsoft").
+# contains "microsoft"; SETUP_PROC_VERSION points the check at another file, for tests).
+#
+# Where it goes (club-3090#1466): your club-3090 settings (club3090.env), through the
+# ONE writer. switch.sh / launch.sh export saved settings before `docker compose`, and
+# gpu-mode passes them as --env-file, so every vLLM compose's
+# `${PYTORCH_CUDA_ALLOC_CONF:-…}` picks it up. It used to be written to
+# models/<model>/vllm/compose/.env, which docker compose never reads: every compose lives
+# in <topology>/<quant>/, and compose loads .env from the compose FILE's directory, not
+# the working directory (checked with `docker compose config`, v5.5.1). A value already
+# set anywhere — shell, club3090.env, the legacy repo .env — is never replaced.
 COMPOSE_DIR="${ROOT_DIR}/models/${MODEL_NAME}/vllm/compose"
-if [[ -f /proc/version ]] && command grep -qi microsoft /proc/version 2>/dev/null; then
-  ENV_FILE="${COMPOSE_DIR}/.env"
-  if [[ -d "${COMPOSE_DIR}" ]]; then
-    if [[ ! -f "${ENV_FILE}" ]]; then
-      cat > "${ENV_FILE}" <<'EOF'
-# WSL2 boot-crash workaround — see PR #84 + issue #60.
-# vLLM + WSL2 + driver 596.36 hit `gptq_marlin_repack` cudaErrorNotReady on boot
-# with the default `expandable_segments:True`. This override fixes it.
-# Auto-created by scripts/setup.sh on detected WSL2 systems. Safe to delete
-# on bare-metal Linux (the compose default works there).
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
-EOF
-      echo "[wsl2] detected WSL2 — created ${ENV_FILE} with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False"
+_proc_version="${SETUP_PROC_VERSION:-/proc/version}"
+if [[ -f "${_proc_version}" ]] && command grep -qi microsoft "${_proc_version}" 2>/dev/null; then
+  _wsl_fix="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False"
+  if [[ -z "${PYTORCH_CUDA_ALLOC_CONF+x}" ]]; then        # set nowhere (club_config_load exported any saved value)
+    if _saved="$(club_config_set "${_wsl_fix}" 2>&1)"; then
+      echo "[wsl2] detected WSL2 — saved ${_wsl_fix} to $(club_config_dir)/club3090.env"
       echo "[wsl2] this fixes the known gptq_marlin_repack boot crash on WSL2 + driver ≥596.36 (issue #60)."
-    elif ! grep -q "expandable_segments:False" "${ENV_FILE}"; then
-      echo "[wsl2] WARN: detected WSL2 but ${ENV_FILE} exists without the expandable_segments:False override."
-      echo "[wsl2]       If vLLM fails to boot with cudaErrorNotReady, add:"
-      echo "[wsl2]         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False"
-      echo "[wsl2]       See PR #84 / issue #60 for context."
     else
-      echo "[wsl2] detected WSL2 — ${ENV_FILE} already has the expandable_segments:False override. ✓"
+      echo "[wsl2] WARN: detected WSL2 but could not save ${_wsl_fix}: $(printf '%s\n' "$_saved" | tail -n 1)" >&2
+      echo "[wsl2]       If vLLM fails to boot with cudaErrorNotReady, export it before launching." >&2
     fi
+  elif [[ "${PYTORCH_CUDA_ALLOC_CONF}" != *expandable_segments:False* ]]; then
+    echo "[wsl2] WARN: detected WSL2 but PYTORCH_CUDA_ALLOC_CONF is already set to '${PYTORCH_CUDA_ALLOC_CONF}'"
+    echo "[wsl2]       (from ${CLUB3090_CONFIG_SOURCE[PYTORCH_CUDA_ALLOC_CONF]:-your environment}) without the expandable_segments:False override."
+    echo "[wsl2]       If vLLM fails to boot with cudaErrorNotReady, change it to:"
+    echo "[wsl2]         ${_wsl_fix}"
+    echo "[wsl2]       See PR #84 / issue #60 for context."
+  else
+    echo "[wsl2] detected WSL2 — PYTORCH_CUDA_ALLOC_CONF already has the expandable_segments:False override. ✓"
+  fi
+  if [[ -f "${COMPOSE_DIR}/.env" ]]; then
+    echo "[wsl2] note: ${COMPOSE_DIR}/.env (written by an older setup.sh, or by hand) is not read by docker compose —"
+    echo "[wsl2]       the composes live in subdirectories, and compose reads .env next to the compose file."
+    echo "[wsl2]       Settings belong in $(club_config_dir)/club3090.env; that file can be deleted once moved."
   fi
 fi
+
+# ---------- Gateway key — one of its own on a fresh install (club-3090#1467) ----------
+# Unless a key is stored, the LiteLLM gateway (:4000, every interface) runs on the public
+# default key every club-3090 install shares. `gateway-key.sh init` stores a random one in
+# secrets.env (0600, never printed) ONLY on a fresh install: no key set anywhere, and no
+# sign the gateway or a client of it has been used here (its container or Open WebUI's,
+# this checkout's rendered gateway config, an omp / pi / Hermes setup, …; the full rule is
+# in gateway-key.sh). On an existing install it changes nothing — clients may hold the
+# current key — and says why. Before the model download, so SKIP_MODEL=1 runs it too.
+# club_config_load exported any STORED key into this shell above; unset that copy, so
+# init sees where it is stored. A key the user exported stays and counts as chosen.
+# Never fatal: the weights are what setup.sh is for.
+(
+  [[ -n "${CLUB3090_CONFIG_SOURCE[LITELLM_MASTER_KEY]:-}" ]] && unset LITELLM_MASTER_KEY
+  CLUB3090_DIR="${ROOT_DIR}" bash "${ROOT_DIR}/scripts/gateway-key.sh" init
+) || echo "[gateway-key] WARN: could not set up a gateway key (above); setup continues. Later: bash scripts/gateway-key.sh rotate" >&2
+echo ""
 
 # ---------- Tool checks ----------
 need() {

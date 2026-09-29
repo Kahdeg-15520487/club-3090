@@ -97,10 +97,19 @@ if [[ -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
   _DEFAULT_ENDPOINT_PORT="$(registry_lookup_default_port qwen3.6-27b 2>/dev/null || true)"
 fi
 URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
-# Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
-# literal below is only a last resort if detection no-ops (endpoint unreachable).
+# Resolve the served model from /v1/models when MODEL is unset (#372).
 declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
-MODEL="${MODEL:-qwen3.6-27b}"
+# #1330: NOT an unconditional `MODEL="${MODEL:-…}"` any more. That fell back to
+# a qwen literal whenever autodetect no-op'd — including against a server that
+# was merely still LOADING — so every request 404'd and the run looked like the
+# config under test was broken. preflight_resolve_model_or_fail refuses the
+# literal exactly when we know better (endpoint unreachable, or we picked the
+# container ourselves and it reports no model) and keeps it otherwise.
+if declare -F preflight_resolve_model_or_fail >/dev/null; then
+  preflight_resolve_model_or_fail "qwen3.6-27b" || exit 1
+else
+  MODEL="${MODEL:-qwen3.6-27b}"
+fi
 if [[ -z "${CONTAINER:-}" && -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
   # The old literal default 'vllm-qwen36-27b' matches NO registry container, so
   # container-coupled checks silently no-op'd on an undetected endpoint. Default
@@ -529,12 +538,15 @@ run_check "streaming_tools" check_streaming_tools
 check_thinking() {
   echo "[7/10] Thinking / reasoning mode ..."
   local resp
-  # enable_thinking: true (Qwen3 default). Math problem that needs visible reasoning.
+  # enable_thinking: true (Qwen3 default). A problem that takes a couple of steps:
+  # this used to ask "What is 2+2?", which adaptive and concise thinkers
+  # (MiMo, ThinkingCap) rightly answer with little or no reasoning, so the check
+  # failed healthy boots. max_tokens still bounds the verbose models.
   resp="$(curl -sf -m 120 "${URL}/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d "{
       \"model\": \"${MODEL}\",
-      \"messages\": [{\"role\": \"user\", \"content\": \"What is 2+2? One-line answer.\"}],
+      \"messages\": [{\"role\": \"user\", \"content\": \"A train leaves at 14:35 and the trip takes 3 hours and 13 minutes. What time does it arrive? Answer with the time only.\"}],
       \"max_tokens\": 4000,
       \"temperature\": 0.3,
       ${THINK_ON_STD}\"chat_template_kwargs\": ${THINK_ON_KW}
@@ -564,7 +576,11 @@ print(f'{len(reasoning)}|{len(content)}|{finish}|{(reasoning[:60] or \"(empty)\"
     fail "reasoning present but content empty, finish=$fin (not length)" \
          "Likely genuine stall — finish_reason should be length if it's just verbosity. reasoning: $r_head"
   elif [[ "$r_len" -lt 50 ]]; then
-    fail "reasoning suspiciously short ($r_len chars)" "reasoning: $r_head"
+    # Short but present, with an answer in content: thinking engaged and was parsed
+    # into its own field, which is what this check tests. How much a model thinks
+    # is a trait (ThinkingCap is concise), not a fault. It used to FAIL here.
+    pass "reasoning $r_len chars (short — a concise thinker; thinking engaged and parsed), content $c_len chars (finish=$fin)"
+    printf "    \033[2mreasoning:\033[0m %s\n" "$r_head"
   else
     pass "reasoning $r_len chars, content $c_len chars (finish=$fin)"
     printf "    \033[2mreasoning:\033[0m %s...\n" "$r_head"

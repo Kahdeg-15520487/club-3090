@@ -2,6 +2,47 @@
 
 Dated history for Qwen3.8-27B configs in this repo. Append-only — add a new entry, don't rewrite past ones.
 
+## 2026-09-27 — SGLang slugs: `--sleep-on-idle` (idle CPU ~2 cores → under half a core)
+
+Every SGLang Qwen3.8 compose now passes `--sleep-on-idle`. Without it each scheduler
+rank busy-polls its event loop while nothing is being served: measured on
+`sgl/qwen38-27b-dual-fast` (TP=2, v0.5.20), **192 % of a CPU core at idle** —
+about one core per GPU, all day — against 3 % for the vLLM dual-fast slug. With it,
+rank 0 blocks in a zmq poll until a request arrives: **42 %** at idle. Serving is
+unchanged within run noise: TTFT after a 4 s idle gap 84 vs 80 ms (median of 8),
+decode 63.4 vs 66.3 tok/s. The flag exists upstream but defaults off. The residual
+~20 % per rank is the scheduler's idle bookkeeping waking ~16×/s (rank 0) and the
+other ranks following it through the gloo broadcast.
+
+## 2026-09-27 — tool schemas render with sorted keys (prefix cache)
+
+The vendored `qwen38-reasoning-effort-template` now renders each tool schema with
+`tojson(sort_keys=True)`. Qwen3.8 puts the tool definitions first in the prompt, so
+a client, gateway or MCP server that re-serialised a schema with its keys in another
+order used to change the prompt at its very start: on vLLM the next turn then missed
+the prefix cache for the whole conversation (0 of 29.6K tokens cached, an 18 s
+re-prefill). Sorted, the same tools always render the same bytes. Only key order
+inside each schema changes; prompts without tools are byte-identical. Detail: the
+patch's [`PROVENANCE.md`](vllm/patches/qwen38-reasoning-effort-template/PROVENANCE.md).
+
+## 2026-09-27 — SGLang: a request's reasoning_effort is honoured again
+
+On every SGLang Qwen3.8 slug the client's `reasoning_effort` was ignored: the
+server default (`low`) rendered instead, whether the effort came top-level or in
+`chat_template_kwargs` — SGLang ≤ 0.5.20 lets a `--default-chat-template-kwargs`
+`reasoning_effort` override the request's own
+([sglang#38104](https://github.com/sgl-project/sglang/issues/38104)). Measured on
+`sgl/qwen38-27b-dual-fast`: `low`, `medium`, `xhigh` and `high` all rendered the
+same 41-token prompt.
+
+The SGLang composes now mount the vendored `qwen38-reasoning-effort-template` over
+the checkpoint's own and set their server default as `default_reasoning_effort`,
+which the template reads only when a request names no effort. Requests that send
+nothing still get `low` (or `REASONING_EFFORT`); requests that send an effort now get
+it, and `high` maps to `xhigh` as on the vLLM slugs. vLLM slugs render exactly as
+before. Detail: the patch's
+[`PROVENANCE.md`](vllm/patches/qwen38-reasoning-effort-template/PROVENANCE.md).
+
 ## 2026-09-13 — ULTRAMAX: prebuilt FP8 KV kernels and native FlashAttention plugin
 
 Fold the FA2 FP8 KV configuration into the existing `ultramax` slug and

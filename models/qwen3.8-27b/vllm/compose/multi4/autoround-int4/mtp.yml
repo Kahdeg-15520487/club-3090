@@ -93,7 +93,7 @@
 #      unchanged by the patches: many LONG-context streams can still OOM (W4A8 +
 #      n=4); if so, lower MAX_NUM_SEQS or SPEC_N=0 (or W4A8=0) and report it.
 #
-# ⚠️⚠️ MAX_NUM_SEQS defaults to 8 (was 2): the MTP-under-concurrency ENGINE CRASH (#40756 FlashInfer decode-plan race + the async wild-write) is now fixed by vllm-flashinfer-decode-pin + vllm-gdn-mtp-async-spec-order (wired below); the dual sibling is validated crash-clean to C=32 at ~1K-tok prompts (2026-08-23). At TP=4 weights fall to ~4.6 GiB/card so per-card headroom exceeds the dual — but THIS IS UNTESTED: no 4-card host exists on the reference rig (community-validated by transfer). SEPARATE VRAM limit unchanged by the patches: many LONG-context concurrent streams can still OOM (W4A8 + n=4). If you hit it, drop MAX_NUM_SEQS or set SPEC_N=0, and please report it.
+# ⚠️⚠️ MAX_NUM_SEQS defaults to 8 (was 2): the MTP-under-concurrency ENGINE CRASH (#40756 FlashInfer decode-plan race + the async wild-write) was fixed by vllm-flashinfer-decode-pin (wired below) plus our V1-runner hoist (vllm-gdn-mtp-async-spec-order); v0.30.0 serves MTP on the V2 runner, where the hoist never ran, so it was removed 2026-09-26 (the async race is untested on V2); the dual sibling is validated crash-clean to C=32 at ~1K-tok prompts (2026-08-23). At TP=4 weights fall to ~4.6 GiB/card so per-card headroom exceeds the dual — but THIS IS UNTESTED: no 4-card host exists on the reference rig (community-validated by transfer). SEPARATE VRAM limit unchanged by the patches: many LONG-context concurrent streams can still OOM (W4A8 + n=4). If you hit it, drop MAX_NUM_SEQS or set SPEC_N=0, and please report it.
 #
 #
 # ⚠️⚠️ CONSUMER BLACKWELL (5090, sm_120) — READ BEFORE RUNNING THIS THERE.
@@ -136,7 +136,7 @@
 # ===========================================================================
 services:
   vllm-qwen38-27b-multi4-fast:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.29.0}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.30.0}
     container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-multi4-fast}"
     user: "0:${DOCKER_GID:-1000}"
     # Repo contract (test-compose-restart-policy): every shipped vLLM compose uses
@@ -164,7 +164,6 @@ services:
       - ../../../../../qwen3.6-27b/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
       # Lets the MTP drafter attach on this hybrid (mamba/eagle block drop).
       - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
-      - ../../../../../qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
       - ../../../patches/vllm-flashinfer-decode-pin:/etc/club3090/flashinfer-decode-pin:ro
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
       # Chat template: the model's OWN, plus seven lines mapping the standard
@@ -174,22 +173,22 @@ services:
       # rung gets HTTP 500 while /v1/models still returns 200. Observed live via
       # /v1/messages?beta=true.
       # ⭐ MOUNTED OVER the checkpoint's own chat_template.jinja: vLLM auto-loads
-      # the template from the model dir, so this needs NO --chat-template arg
-      # (the same wiring style as the carnice override -- see patches.yml).
-      # That is deliberate, not incidental: upstream edits the args list
-      # constantly (11 commits touched these composes in the last 7 days), and
-      # every edit there collides with an inserted flag. The volumes block is
-      # quiet by comparison, so wiring here is what keeps this patch rebasable.
+      # the template from the model dir, so every endpoint renders it from here.
+      # The command ALSO names the same file with --chat-template, for vLLM's
+      # Anthropic /v1/messages — see the note there.
       # DATA-ONLY mount, not an engine-code overlay, so the engine's overlay-free
       # contract is unaffected. See patches.yml qwen38-reasoning-effort-template.
       - ../../../patches/qwen38-reasoning-effort-template/chat_template.jinja:/root/.cache/huggingface/qwen3.8-27b-autoround-int4/chat_template.jinja:ro
-      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
-      - ../../../cache/triton:/root/.triton/cache
+      - ${CLUB3090_ENGINE_CACHE_DIR:-../../../cache}/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ${CLUB3090_ENGINE_CACHE_DIR:-../../../cache}/triton:/root/.triton/cache
     environment:
       # Drafter toggle — docker only forwards what is declared here. The DEFAULT
       # lives in the entrypoint, not in these lines, so it cannot drift.
       - SPEC_N=${SPEC_N:-}
       - SPEC=${SPEC:-}
+      # Draft sampling for the drafter (see SPEC_ARGS below). Bare on purpose:
+      # unset keeps the compose default instead of arriving EMPTY.
+      - DRAFT_SAMPLE_METHOD
       # Sampler env passthrough (#984/#1014): the ENTRYPOINT — not compose
       # interpolation, which has no if/else — derives --override-generation-config
       # from the model-card row matching ENABLE_THINKING, so these must reach the
@@ -223,6 +222,7 @@ services:
       - OMP_NUM_THREADS=1
       - MAMBA_BLOCK_SIZE=${MAMBA_BLOCK_SIZE:-}
       - MAMBA_CACHE_DTYPE=${MAMBA_CACHE_DTYPE:-}
+      - MAMBA_SSM_CACHE_DTYPE=${MAMBA_SSM_CACHE_DTYPE:-}
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       # ⭐ W4A8 (int8 activations) SHIPS ON — set W4A8=0 for the W4A16 path.
       - W4A8=${W4A8:-1}
@@ -252,7 +252,6 @@ services:
         fi
         bash /etc/club3090/w4a8/install.sh
         bash /etc/club3090/pr48375/install.sh || exit 1
-        bash /etc/club3090/gdn-async-order/install.sh || exit 1
         FI_PINQ_LIB_ALL="${FI_PINQ_LIB_ALL:-0}" bash /etc/club3090/flashinfer-decode-pin/install.sh || exit 1
         echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE:-<unset -> W4A16>} (W4A8=$${W4A8:-1})"
         AR=""
@@ -275,10 +274,23 @@ services:
           echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
           exit 1 ;;
         esac
+        # Draft sampling. `probabilistic` samples each draft token at the request's
+        # temperature and keeps the draft logits for the rejection test, so a draft
+        # is accepted with probability min(1, p/q) instead of p(draft): more tokens
+        # accepted per step whenever temperature > 0, with the same output
+        # distribution (the target model still decides). vLLM defaults to `greedy`.
+        # Checked in the v0.30.0 source: the V2 runner implements it for MTP and
+        # DFlash2. `greedy` reverts; it is also what a heterogeneous draft vocab
+        # requires.
+        _dsm="$${DRAFT_SAMPLE_METHOD:-probabilistic}"
+        case "$$_dsm" in
+          greedy|probabilistic) : ;;
+          *) echo "[spec] DRAFT_SAMPLE_METHOD='$$_dsm' must be greedy or probabilistic" >&2; exit 1 ;;
+        esac
         SPEC_ARGS=()
         if [ "$$_spec_n" -gt 0 ]; then
-          SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$$_spec_n}")
-          echo "[spec] drafter ON - mtp n=$$_spec_n" >&2
+          SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$$_spec_n,\"draft_sample_method\":\"$$_dsm\"}")
+          echo "[spec] drafter ON - mtp n=$$_spec_n, draft sampling $$_dsm" >&2
         else
           echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2
         fi
@@ -313,7 +325,16 @@ services:
         SAMPLER_ARGS=(--override-generation-config "{\"temperature\":$$_temp,\"top_p\":$${TOP_P},\"top_k\":$${TOP_K:-20},\"min_p\":$${MIN_P:-0.0},\"presence_penalty\":$${PRESENCE_PENALTY},\"repetition_penalty\":$${REPEAT_PENALTY:-1.0}}")
         # -- Mamba/GDN cache knobs (hybrid-model KV headroom) --
         #   MAMBA_BLOCK_SIZE=<tokens>  checkpoint SSM state every N tokens (align mode; multiple of 8)
-        #   MAMBA_CACHE_DTYPE=bfloat16 store conv+ssm state in bf16 instead of fp32
+        #   MAMBA_CACHE_DTYPE=bfloat16 the CONV state only, on this model. ⚠️ It does NOT move the
+        #                              SSM state: for Qwen3.5-family models vLLM copies the HF config's
+        #                              mamba_ssm_dtype (float32) into --mamba-ssm-cache-dtype whenever
+        #                              that is `auto` (Qwen3_5ForConditionalGenerationConfig) — so this
+        #                              knob alone left the SSM fp32 while its comment said conv+ssm.
+        #   MAMBA_SSM_CACHE_DTYPE      the SSM state. DEFAULT bfloat16 on every Qwen3.8-family vLLM
+        #                              compose (2026-09-24): halves the per-request SSM snapshots —
+        #                              (2+SPEC_N) per request in align mode, charged to the KV pool.
+        #                              Measured on dual-fast: +5.3% pool alone, full verify-stress clean.
+        #                              Set float32 (or auto = the model's float32) to revert.
         # Ported from dual/autoround-int4 (#1170). In align mode the GDN/SSM state is
         # checkpointed at EVERY attention block and those pages come out of the same
         # pool as attention KV WITHOUT appearing in vLLM's "GPU KV cache size" figure,
@@ -326,11 +347,21 @@ services:
         MAMBA_ARGS=()
         if [ -n "$${MAMBA_BLOCK_SIZE:-}" ]; then MAMBA_ARGS+=(--mamba-block-size "$${MAMBA_BLOCK_SIZE}"); echo "[mamba] block size $${MAMBA_BLOCK_SIZE}" >&2; fi
         if [ -n "$${MAMBA_CACHE_DTYPE:-}" ]; then MAMBA_ARGS+=(--mamba-cache-dtype "$${MAMBA_CACHE_DTYPE}"); echo "[mamba] cache dtype $${MAMBA_CACHE_DTYPE}" >&2; fi
+        _ssm_dt="$${MAMBA_SSM_CACHE_DTYPE:-bfloat16}"
+        if [ "$$_ssm_dt" != "auto" ]; then MAMBA_ARGS+=(--mamba-ssm-cache-dtype "$$_ssm_dt"); fi
+        echo "[mamba] ssm cache dtype $$_ssm_dt" >&2
         exec vllm serve $$AR "$$@" "$${SPEC_ARGS[@]}" "$${MAMBA_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
       - --
     command:
       - --model
       - /root/.cache/huggingface/qwen3.8-27b-autoround-int4
+      # Names the chat_template.jinja mounted over the model dir (volumes). vLLM v0.30.0's
+      # Anthropic /v1/messages checks only this flag to decide whether the template can
+      # take a system message mid-conversation; without it every such message is moved
+      # to the front, and Claude Code (one per turn) re-prefills the whole conversation
+      # each turn. vllm#58754 fixes the check — see docs/UPSTREAM.md.
+      - --chat-template
+      - /root/.cache/huggingface/qwen3.8-27b-autoround-int4/chat_template.jinja
       - --served-model-name
       - qwen3.8-27b
       - --quantization

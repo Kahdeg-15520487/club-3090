@@ -14,6 +14,7 @@
 # ⚠️ Arms 1-2 must FAIL against the pre-fix tree. If they pass before the fix
 # they are asserting the wrong thing.
 set -uo pipefail
+export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 NAME="test-engine-kind-resolver"
 FAIL=0
@@ -47,12 +48,17 @@ else
     "engine_kind_from_fingerprint sglang-0.5.19:sglang" \
     "engine_kind_from_fingerprint vllm-0.29.0-tp2:vllm" \
     "engine_kind_from_fingerprint b10920-4df29be4f:llamacpp" \
+    "engine_kind_from_owned_by llamacpp:llamacpp" \
+    "engine_kind_from_owned_by vllm:vllm" \
+    "engine_kind_from_owned_by sglang:sglang" \
+    "engine_kind_from_owned_by tabbyAPI:exllamav3" \
+    "engine_kind_from_owned_by openai:unknown" \
   ; do
     want="${probe##*:}"; call="${probe%:*}"
     got="$($call 2>/dev/null || true)"
     [[ "$got" == "$want" ]] || bad "resolver: $call" "$want" "$got"
   done
-  [[ $FAIL -eq 0 ]] && ok "canonical resolver maps every known engine id, container, image and fingerprint"
+  [[ $FAIL -eq 0 ]] && ok "canonical resolver maps every known engine id, container, image, fingerprint and owned_by"
 fi
 
 # --- 2: spec-sweep.sh must classify an SGLang slug as sglang (#1282) ---------

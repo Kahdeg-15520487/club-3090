@@ -29,6 +29,12 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 [[ -n "${_PREFLIGHT_LOADED:-}" ]] && return 0
 # shellcheck source=lib/club-containers.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
+# shellcheck source=lib/served-model.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/served-model.sh"
+# #1247: the canonical engine-family resolver. preflight_compose_deps used to
+# carry its own image regex and was blind to our own fork's image name.
+# shellcheck source=scripts/lib/engine-kind.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/engine-kind.sh"
 _PREFLIGHT_LOADED=1
 _PREFLIGHT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -816,7 +822,7 @@ preflight_hf_token() {
     echo "[preflight]          Fix: visit https://huggingface.co/settings/tokens, create a read token," >&2
     echo "[preflight]               accept the model T&C at https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct" >&2
     echo "[preflight]               (and any other Qwen3-Next variant you'll use)," >&2
-    echo "[preflight]               then export HF_TOKEN=hf_... in your shell or .env file." >&2
+    echo "[preflight]               then save it: bash scripts/settings.sh set HF_TOKEN=hf_...   (goes to secrets.env, 0600)" >&2
     return 0
   fi
   # Sanity check token format — HF tokens start with hf_ and are 30+ chars
@@ -1243,9 +1249,23 @@ preflight_compose_deps() {
   # llama.cpp-family server: it mounts ${MODEL_DIR}:/models and passes
   # `-m /models/<path>` (+ `--spec-draft-model /models/<path>` for DFlash/MTP),
   # so it belongs on the GGUF presence path, NOT the vLLM HF-cache path.
-  if grep -qhE 'image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama|beellama)' "${compose_files[@]}"; then
-    is_llamacpp=1
-  fi
+  # ⚠️ This used to be a PRIVATE image regex:
+  #     image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama|beellama)
+  # which did not know our OWN fork's image name, ghcr.io/noonghunna/llamacpp-club3090.
+  # All 28 llamacpp-club3090/* slugs therefore skipped this whole block and fell to
+  # the vLLM HF-cache path, which found nothing to complain about and returned 0 —
+  # so the check that exists to catch a missing drafter never ran for them. A user
+  # with no DFlash2 drafter on disk got a CRASH-LOOP instead of one clear line
+  # (#1247). A check that passes because it measured nothing.
+  # Now delegated to the canonical resolver (#1282) — it classifies every image we
+  # ship, including the forks, and adding an engine means adding arms THERE only.
+  local _img _kind
+  while IFS= read -r _img; do
+    [[ -n "$_img" ]] || continue
+    _kind="$(engine_kind_from_image "$_img")"
+    if [[ "$_kind" == "llamacpp" ]]; then is_llamacpp=1; break; fi
+  done < <(command grep -hE '^[[:space:]]*image:' "${compose_files[@]}" \
+             | sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//' || true)
 
   if [[ $is_llamacpp -eq 1 ]]; then
     local gguf_paths=()
@@ -1508,7 +1528,8 @@ preflight_autodetect_endpoint() {
   fi
 
   # Detect a running inference container by its ENGINE-INTERNAL port mapping
-  # (vLLM 8000 / llama.cpp 8080 / sglang 30000), NOT a hardcoded model-name
+  # (vLLM 8000 / llama.cpp 8080 / sglang 30000 / TabbyAPI 5000 — the last only
+  # for a container that is ours by name, see club_engine_port_lines), NOT a hardcoded model-name
   # allowlist — so any compose is found regardless of model: gemma-4-12b,
   # qwen-35b-a3b, beellama, a BYO container, etc. (#310: the old allowlist only
   # knew qwen36-27b / gemma-4-31b, so everything else silently fell back to 8020).
@@ -1521,7 +1542,7 @@ preflight_autodetect_endpoint() {
   # before its own "endpoint not responding" path. Empty = the no-container case.
   local engine_lines found_line
   engine_lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
-    | command grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' || true)
+    | club_engine_port_lines || true)
   if [[ -z "$engine_lines" ]]; then
     return 0   # nothing serving on an engine port; defaults stand
   fi
@@ -1538,9 +1559,10 @@ preflight_autodetect_endpoint() {
   detected_name="${found_line%%|*}"
   # Extract host port from "0.0.0.0:8011->8000/tcp", "[::]:8011->8000/tcp",
   # or "127.0.0.1:8011->8000/tcp" forms (BIND_HOST=127.0.0.1 produces the last).
-  # llama-cpp container maps to internal 8080, vllm to 8000, sglang to 30000.
+  # llama-cpp container maps to internal 8080, vllm to 8000, sglang to 30000,
+  # TabbyAPI (exllamav3) to 5000.
   detected_port=$(echo "${found_line#*|}" \
-    | command grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' \
+    | command grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(${CLUB_ENGINE_PORTS_ANY})/tcp" \
     | head -1 \
     | sed -E 's|^[^:]+:([0-9]+)->.*|\1|')
 
@@ -1557,7 +1579,11 @@ preflight_autodetect_endpoint() {
     local note=""
     [[ -z "$explicit_container" ]] && note="container=${CONTAINER}"
     [[ -z "$explicit_url" ]] && note="${note:+$note }url=${URL}"
-    echo "[autodetect] using running ${note}  (skip: PREFLIGHT_NO_AUTODETECT=1)" >&2
+    echo "[autodetect] using running ${note}  (override with CONTAINER=/URL=, or PREFLIGHT_NO_AUTODETECT=1 to disable)" >&2
+    # #1330: remember that WE chose this endpoint. preflight_resolve_model_or_fail
+    # refuses the last-resort literal when we know which container is up but cannot
+    # read its model -- a guess is only reasonable when we know nothing.
+    PREFLIGHT_ENDPOINT_AUTODETECTED=1
   fi
   return 0
 }
@@ -1582,23 +1608,108 @@ preflight_autodetect_endpoint() {
 # reachability check then surfaces the real outage). Callers keep their own
 # last-resort literal after this, so behaviour is unchanged when detection no-ops.
 preflight_autodetect_model() {
-  [[ -n "${MODEL:-}" ]] && return 0
+  # #1330: every exit path now SAYS something. The old version printed only on
+  # success, so the one component that failed was the silent one -- a slow boot
+  # read as "8 checks failed" against a config that was fine.
+  PREFLIGHT_MODEL_UNRESOLVED=""
+  if [[ -n "${MODEL:-}" ]]; then
+    return 0        # explicit value always wins; silent because it is the normal case
+  fi
   local url="${1:-${URL:-}}"
-  [[ -n "$url" ]] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  local detected
-  detected="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null \
-    | python3 -c "import json,sys
-try:
-    d = json.load(sys.stdin).get('data', [])
-    print(d[0]['id'] if d else '')
-except Exception:
-    print('')" 2>/dev/null || true)"
+  if [[ -z "$url" ]]; then
+    echo "[autodetect] no URL to query — MODEL not autodetected" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="no-url"; return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "[autodetect] curl/python3 unavailable — MODEL not autodetected" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="no-tools"; return 0
+  fi
+
+  # The overwhelmingly common failure is a server still loading, so give it a
+  # bounded wait instead of resolving the wrong thing. Only costs time when the
+  # endpoint is down, which is exactly when nobody minds.
+  local wait_s="${PREFLIGHT_MODEL_WAIT_S:-10}"
+  local deadline=$(( SECONDS + wait_s )) detected="" body="" announced=0
+  while :; do
+    body="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null || true)"
+    if [[ -n "$body" ]]; then
+      # #1360: TabbyAPI (exllamav3) lists EVERY folder in its model directory on
+      # /v1/models, so the first entry is whichever folder the filesystem
+      # returns first (a report got 'modules'). club_served_model_id prefers
+      # its /v1/model (the LOADED model); other engines 404 there and get the
+      # first /v1/models entry, exactly as before.
+      detected="$(club_served_model_id "$url")"
+      break
+    fi
+    (( SECONDS >= deadline )) && break
+    if (( ! announced )); then
+      echo "[autodetect] ${url%/}/v1/models not answering yet — waiting up to ${wait_s}s (PREFLIGHT_MODEL_WAIT_S=0 to skip)" >&2
+      announced=1
+    fi
+    sleep 1
+  done
+
   if [[ -n "$detected" ]]; then
     MODEL="$detected"
-    echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/models; set MODEL= to override)" >&2
+    echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/model[s]; set MODEL= to override)" >&2
+    return 0
   fi
+  if [[ -z "$body" ]]; then
+    echo "[autodetect] ⚠ ${url%/}/v1/models UNREACHABLE — could not resolve MODEL" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="unreachable"
+  else
+    echo "[autodetect] ⚠ ${url%/}/v1/models answered but reported NO model — could not resolve MODEL" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="no-models"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# #1330: the last-resort literal, with the one case where it must NOT be used.
+#
+# Callers used to write `MODEL="${MODEL:-qwen3.6-27b}"` unconditionally right
+# after autodetect. Against a still-booting server that serves something else,
+# every request then 404s, and the output is indistinguishable from the thing
+# under test being broken. That cost a real detour: verify-full reported rc=8,
+# 8/8 failed, on a compose that passed 10/10 once the engine had loaded.
+#
+# The rule: a literal is a reasonable GUESS when we know nothing, and is never
+# right when we know better.
+#   endpoint UNREACHABLE  -> refuse. Nothing can work; say THAT instead of
+#                            inventing a model name to fail against.
+#   answered, no model, and we AUTODETECTED the container -> refuse. We know
+#                            which container is up; an unrelated literal is a
+#                            worse answer than an honest stop.
+#   answered, no model, user-supplied URL -> warn loudly, use the literal. Keeps
+#                            the BYO / llama.cpp case working (llama.cpp ignores
+#                            the request's model field entirely, #371).
+preflight_resolve_model_or_fail() {
+  local fallback="${1:?preflight_resolve_model_or_fail needs a fallback literal}"
+  [[ -n "${MODEL:-}" ]] && return 0
+  local why="${PREFLIGHT_MODEL_UNRESOLVED:-}"
+  if [[ "$why" == "unreachable" || ( "$why" == "no-models" && -n "${PREFLIGHT_ENDPOINT_AUTODETECTED:-}" ) ]]; then
+    echo "" >&2
+    echo "ERROR: could not resolve which model to request, and guessing would be worse." >&2
+    echo "  endpoint : ${URL:-<unset>}${CONTAINER:+  (container ${CONTAINER})}" >&2
+    if [[ "$why" == "unreachable" ]]; then
+      echo "  reason   : /v1/models is not answering — the server is still loading, or is not up." >&2
+      echo "  ⚠ This is NOT a failure of whatever you are testing. Falling back to" >&2
+      echo "    '${fallback}' here would 404 every request and look exactly like one (#1330)." >&2
+      echo "  fix      : wait for the engine to finish loading, then re-run. Watch it with" >&2
+      echo "               docker logs -f ${CONTAINER:-<container>}" >&2
+      echo "             A boot-time crash-loop shows up as a climbing RestartCount:" >&2
+      echo "               docker inspect ${CONTAINER:-<container>} --format '{{.RestartCount}}'" >&2
+    else
+      echo "  reason   : /v1/models answered but listed no model." >&2
+    fi
+    echo "  override : MODEL=<served-name> $(basename "${BASH_SOURCE[-1]:-this script}") …" >&2
+    echo "" >&2
+    return 1
+  fi
+  if [[ -n "$why" ]]; then
+    echo "[autodetect] falling back to MODEL='${fallback}' (${why}) — pin MODEL= if that is wrong" >&2
+  fi
+  MODEL="$fallback"
   return 0
 }
 
@@ -1840,13 +1951,15 @@ preflight_detect_thinking_control() {
             if [[ -z "${THINK_EFFORT_OFF_VALUE:-}" ]]; then
               THINK_CONTROL="none"
             else
-              # ⚠️ THE BAR MUST MATCH THE CONSUMER'S. verify-full [7] fails a level
-              # whose reasoning is <50 chars ("suspiciously short"). An earlier
+              # ⚠️ THE PROBE MUST NOT BE LOOSER THAN THE CONSUMER. An earlier
               # revision accepted ANY non-zero reasoning, so the ladder blessed
-              # GLM's `high` on ~11 chars and [7] then REJECTED the value the probe
-              # had just chosen — probe and check disagreeing about what "thinking
-              # is on" means. 50 is that consumer's threshold; the probe budget
-              # above is sized to clear it comfortably (96 tok >> 50 chars).
+              # GLM's `high` on ~11 chars and verify-full [7], which then failed
+              # reasoning under 50 chars, REJECTED the value the probe had just
+              # chosen. [7] now passes short-but-present reasoning (2026-09-26:
+              # concise thinkers such as ThinkingCap were failing healthy boots), so
+              # this 50-char bar is the stricter of the two, which is the safe
+              # direction: the ladder still climbs to a level where thinking really
+              # engages. The probe budget above clears it comfortably (96 tok >> 50).
               local _min_reasoning=50 _rlen
               for _lvl in high xhigh max; do
                 _rlen="$(_preflight_probe_thinking_reasoning "$url" "$model" "{\"reasoning_effort\": \"${_lvl}\"}")"

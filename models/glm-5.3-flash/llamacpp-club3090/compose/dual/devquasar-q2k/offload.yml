@@ -274,8 +274,9 @@
 #       ⚠️ It does NOT work on the GGUF's own embedded template: every request carrying
 #       `tools` returns HTTP 400 "Unable to generate parser for this template …
 #       CallExpression at line 163, column 57", and /props reports supports_tools:false.
-#       Reported club-3090#1250 (@paulp83); upstream ggml-org/llama.cpp#28786 (filed
-#       2026-09-11), same symptom previously unanswered on ggml-org/llama.cpp#27754.
+#       Reported club-3090#1250 (@paulp83); upstream ggml-org/llama.cpp#28786 (resolved
+#       2026-09-12 by PR #28817 — present in mainline v0.5.0 (b11146), but this fork image
+#       predates it, so the override is still required here; see docs/UPSTREAM.md).
 #       ⛔⛔ THE LINE IN THAT ERROR IS THE CRASH SITE, NOT THE CAUSE. Two earlier readings
 #       of this bug were WRONG and are recorded so nobody re-derives them:
 #         ❌ "minja cannot evaluate .items()" — GLM-4.7-Flash.jinja has the identical
@@ -697,7 +698,13 @@ services:
       # page-cache-backed. Validated for GLM 2026-08-28 (two runs, both correct
       # and terminating) — GLM is NOT affected by the --no-mmap defect that
       # blocks Qwen3.8-Flash-Next.
-      - '--no-mmap'
+      # `--load-mode none` replaces `--no-mmap` (#1370 follow-up). Same meaning —
+      # upstream documents `none` as "no special loading mode", i.e. no mmap. The old
+      # flag still WORKS on this fork's pin (with a DEPRECATED warning) but is GONE
+      # from mainline, which already made 3 llamacpp/* slugs unbootable; migrating now
+      # means the next rebase past that removal is a no-op here.
+      - '--load-mode'
+      - 'none'
       - '-md'
       - '/models/glm-5.3-flash-gguf/dflash2/GLM-5.3-Flash-DFlash2-Q4_K_M.gguf'
       # ✅ VERIFIED 2026-08-28 from the drafter GGUF's own metadata

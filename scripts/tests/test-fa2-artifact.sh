@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline contract tests for the prebuilt FlashAttention artifact consumer.
 set -euo pipefail
+export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 python3 - "$ROOT_DIR" <<'PY'
@@ -119,6 +120,11 @@ for name, enabled, level, disabled in (("pcie", 0, "", True), ("pcie-p2p", 1, "P
         for sub in set(re.findall(r"/etc/club3090/([\w.-]+)/install\.sh", body)):
             (etc / sub).mkdir()
             (etc / sub / "install.sh").write_text("exit 0\n", encoding="utf-8")
+        # #1358: the envelope helper is sourced, not stubbed — run the real one.
+        if "/etc/club3090/fa2/envelope.sh" in body:
+            (etc / "fa2").mkdir(exist_ok=True)
+            (etc / "fa2" / "envelope.sh").write_text(
+                (script.parent / "envelope.sh").read_text(encoding="utf-8"), encoding="utf-8")
         engine = root / "vllm"
         engine.write_text('#!/usr/bin/env bash\nprintf "ALLOC=%s\\n" "$PYTORCH_CUDA_ALLOC_CONF"\nprintf "%s\\n" "$@"\n', encoding="utf-8")
         engine.chmod(0o755)

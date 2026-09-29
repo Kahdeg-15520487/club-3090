@@ -22,6 +22,7 @@
 #                              and would adopt a production server's argv/env.
 #   PREFLIGHT_NO_AUTODETECT=1  bench.sh otherwise adopts whatever container is up.
 set -euo pipefail
+export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONUTF8="${PYTHONUTF8:-1}"   # repo rule: locale must not decide python decoding
 BENCH="$ROOT_DIR/scripts/bench.sh"
@@ -462,12 +463,29 @@ for want in "kv=q8_0" "threads=24" "ngl=99" "split=1,1" "ubatch=2048"; do
   command grep -q -- "$want" <<<"$fp" || fail "argv fingerprint missing $want: $fp"
 done
 [[ "$(cap_kv_type "$ARGV")" == "q8_0 (source: argv)" ]] || fail "KV type not read from argv"
+cat > "$TMP/sglang-kv.log" <<'EOF'
+[old boot] server_args={'kv_cache_dtype': 'fp8_e5m2'}
+[old boot] KV Cache is allocated. dtype: torch.float8_e5m2, #tokens: 100
+[current boot] server_args={'tp_size': 2, 'kv_cache_dtype': 'fp8_e4m3'}
+EOF
+CAP_PROPS_TRIED=1; CAP_PROPS=""; CAP_LOG="$TMP/sglang-kv.log"
+v="$(cap_kv_type '' || true)"
+[[ "$v" == "fp8_e4m3 (source: SGLang server_args)" ]] \
+  || fail "SGLang KV type must come from the latest server_args boot, got: '$v'"
+printf '%s\n' '[boot] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 177667' \
+  > "$TMP/sglang-kv-allocation.log"
+CAP_LOG="$TMP/sglang-kv-allocation.log"
+v="$(cap_kv_type '' || true)"
+[[ "$v" == "torch.float8_e4m3fn (source: SGLang allocation log)" ]] \
+  || fail "SGLang allocation-log KV dtype not captured, got: '$v'"
 # With no -ctk/-ctv the llama.cpp default is f16 — a fact the reader can act on,
 # where "unavailable" is not. Only inferred once the engine family is identified.
-CAP_LOG="$TMP/end.log" v="$(cap_kv_type 'llama-server -m /m/x.gguf -ngl 99' || true)"
+CAP_LOG="$TMP/end.log"
+v="$(cap_kv_type 'llama-server -m /m/x.gguf -ngl 99' || true)"
 [[ "$v" == "f16 (engine default; no -ctk/-ctv in argv)" ]] \
   || fail "a llama.cpp run with no KV flag should report the engine default, got: '$v'"
-CAP_LOG="" CAP_PROPS_TRIED=1 CAP_PROPS="" v="$(cap_kv_type '' 2>/dev/null || echo UNAVAILABLE)"
+CAP_LOG=""; CAP_PROPS_TRIED=1; CAP_PROPS=""
+v="$(cap_kv_type '' 2>/dev/null || echo UNAVAILABLE)"
 [[ "$v" == "UNAVAILABLE" ]] || fail "with no argv and no identifiable engine, KV must stay unavailable, got: '$v'"
 command grep -q 'argv -ot' <<<"$(cap_offload_detected "$ARGV")" || fail "-ot must trigger offload detection"
 command grep -q 'moe_cache_cap=8192' <<<"$(cap_moe_cache_config "$ARGV")" \
@@ -476,6 +494,9 @@ command grep -q 'moe_cache_cap=8192' <<<"$(cap_moe_cache_config "$ARGV")" \
 # third signal for a server whose argv we cannot read.
 command grep -q 'n-cpu-moe' <<<"$(cap_offload_detected 'llama-server --n-cpu-moe 20')" \
   || fail "--n-cpu-moe must trigger offload detection"
+# ExLlamaV3 uses a different spelling for its CPU-resident expert split.
+command grep -q 'cpu-moe-split-experts' <<<"$(cap_offload_detected 'python main.py --cpu-moe-split-experts 144')" \
+  || fail "--cpu-moe-split-experts must trigger offload detection"
 CAP_LOG="$TMP/end.log" && command grep -q 'CUDA_Host' <<<"$(cap_offload_detected '')" \
   || fail "a CUDA_Host model buffer line must trigger offload detection"
 echo "  ✓ argv/env fingerprint: KV type, offload signals (x3), moe-cache cap"
@@ -767,7 +788,11 @@ echo "  ✓ prefill warm-up lands on its token target (word-count sizing would o
 command grep -q 'RAM BANDWIDTH CEILING' "$TMP/healthy.out" \
   && fail "the STREAM calibration must be OPT-IN (it is not free)"
 run_bench healthy "$((PORT_BASE+9))" "$TMP/stream.out" ONLY=narr RUNS=1 WARMUPS=0 STREAM_CALIB=1
-if command grep -q 'RAM BANDWIDTH CEILING' "$TMP/stream.out"; then
+# Branch on the triad VALUE line, not the "RAM BANDWIDTH CEILING" header: the
+# header is printed unconditionally when STREAM_CALIB=1 (bench.sh), so it cannot
+# tell a produced ceiling from a numpy-absent degradation. The value line is
+# printed only when a ceiling was actually measured.
+if command grep -q 'triad ceiling  :' "$TMP/stream.out"; then
   command grep -qE 'triad ceiling  : [0-9.]+ GB/s  \([0-9]+ concurrent workers' "$TMP/stream.out" \
     || fail "the triad ceiling must state its worker count — a single-threaded number is not a host ceiling"
   echo "  ✓ STREAM_CALIB=1 reports a multi-worker sustained ceiling (and is off by default)"

@@ -97,18 +97,50 @@ p2p_driver_flavor() {
   esac
 }
 
+# Normalize the ordered engine log into the small set of interconnect signals
+# understood by the classifier. Keeping this here makes bench.sh and report.sh
+# consume identical evidence. In particular, SGLang does not run our
+# detect_nvlink.sh entrypoint, but it emits definitive runtime lines for NCCL
+# and CustomAllReduceV2 initialization.
+p2p_engine_log_evidence() {
+  awk '
+    index($0, "server_args=") && index($0, "disable_custom_all_reduce") {
+      if ($0 ~ /["\047]disable_custom_all_reduce["\047][[:space:]]*:[[:space:]]*(True|true)/)
+        print "[sglang] BOOT disable_custom_all_reduce=True"
+      else if ($0 ~ /["\047]disable_custom_all_reduce["\047][[:space:]]*:[[:space:]]*(False|false)/)
+        print "[sglang] BOOT disable_custom_all_reduce=False"
+      next
+    }
+    index($0, "[nvlink]") ||
+    index($0, "Custom allreduce is disabled") ||
+    index($0, "CustomAllreduce is disabled") ||
+    index($0, "CustomAllReduceV2 is disabled") ||
+    index($0, "disable_custom_all_reduce=True") ||
+    index($0, "Setup Custom allreduce failed") ||
+    index($0, "sglang is using nccl==") ||
+    index($0, "All Reduce config:") { print; next }
+    # The V1 custom all-reduce (every PCIe rig: SGLang admits V2 only on full
+    # NVLink) logs nothing when it initializes. Its first sign of life is the
+    # graph-buffer registration after CUDA-graph capture, rank 0 only.
+    index($0, "Registering ") && index($0, " cuda graph addresses") { print }
+  '
+}
 # Engagement classifier — PURE (takes the boot-trail/env text on stdin so the
 # caller decides where it comes from and tests can feed fixtures).
-# report.sh already gathers exactly this text: the container's `[nvlink]`
-# boot lines + resolved NCCL_P2P*/NVLINK_MODE env + vLLM's own custom-AR
-# gate line when present.
+# report.sh and bench.sh gather exactly this normalized text: the container's
+# `[nvlink]` boot lines, resolved NCCL_P2P*/NVLINK_MODE env, and the engine's
+# own all-reduce runtime lines. vLLM reports vetoes; SGLang additionally reports
+# `sglang is using nccl==...` and, when its custom all-reduce is live, either
+# `All Reduce config: ...` (V2, NVLink only) or `Registering N cuda graph
+# addresses` (V1 — the only success signal on PCIe, and only with CUDA graphs).
 # Prints: "on" | "nccl_only_operator" | "nccl_only_gated" | "nccl_only_degraded"
-#         | "nccl_only_nolib" | "off" | "unknown" | "requested".
+#         | "nccl_only_nolib" | "nccl_only_failed" | "off" | "unknown" | "requested".
 # Reads detect_nvlink.sh's machine-readable STATE line for OUR configuration and
-# vLLM's own messages for what the ENGINE did; our prose is only consulted on the
-# legacy path (containers predating STATE, SGLang, llama.cpp). See #1332.
+# vLLM/SGLang runtime messages for what the ENGINE did; our prose is consulted
+# only on the legacy path (containers predating STATE and non-SGLang engines).
+# See #1332.
 p2p_classify_engagement() {
-  local text state engine_verdict transport kernel cause verified
+  local text state sglang_boot engine_verdict transport kernel cause verified
   text="$(cat)"
 
   # ── Step 0: slice to the CURRENT BOOT ────────────────────────────────────
@@ -130,6 +162,17 @@ p2p_classify_engagement() {
   if [ -n "$state" ]; then
     text="$(printf '%s\n' "$text" | tac \
             | awk 'index($0,"[nvlink] STATE v=1 ")>0 {print; exit} {print}' | tac)"
+  else
+    # SGLang has no club STATE line. Its server_args dump is the boot marker;
+    # p2p_engine_log_evidence normalizes the enormous dict to this short line.
+    # Slice at the last marker so an operator-disabled restart cannot combine
+    # with an "All Reduce config" success line from an earlier boot (or vice
+    # versa).
+    sglang_boot="$(printf '%s\n' "$text" | command grep -F '[sglang] BOOT disable_custom_all_reduce=' | tail -n 1)"
+    if [ -n "$sglang_boot" ]; then
+      text="$(printf '%s\n' "$text" | tac \
+              | awk 'index($0,"[sglang] BOOT disable_custom_all_reduce=")>0 {print; exit} {print}' | tac)"
+    fi
   fi
 
   # ── Step 1: a forced-but-unconfirmed request outranks everything (#688) ───
@@ -152,19 +195,22 @@ p2p_classify_engagement() {
   case "$text" in
     *"lacks GPU P2P capability"*|*"P2P test failed"*)       engine_verdict=degraded ;;
     *"missing custom allreduce library"*)                   engine_verdict=nolib ;;
+    # SGLang catches ANY exception while building its custom all-reduce, logs this
+    # line and falls back to NCCL — the boot args still say it is enabled
+    # (club-3090#1462: UUID-form CUDA_VISIBLE_DEVICES was one such exception). Its
+    # advice suffix names --disable-custom-all-reduce, so this must precede the
+    # operator match below.
+    *"Setup Custom allreduce failed"*)                       engine_verdict=failed ;;
     *"not supported on"*"PCIe-only GPUs"*)                  engine_verdict=gated ;;
-    *"Custom allreduce is disabled"*)                       engine_verdict=gated ;;
+    *"Custom allreduce is disabled"*|*"CustomAllreduce is disabled"*|*"CustomAllReduceV2 is disabled"*)
+                                                               engine_verdict=gated ;;
     # ⚠️ LAST, and only reachable when no veto matched above — every veto message
     # ends "To silence this warning, specify disable_custom_all_reduce=True",
     # which contains this substring and must not be read as an operator choice.
-    #
-    # This arm is why the engine's argv is consulted at all. Our STATE line says
-    # what detect_nvlink.sh DECIDED; it cannot know that a compose passed the flag
-    # on its own. `models/qwen3.8-27b/vllm/compose/dual/fp8/dflash2.yml` does
-    # exactly that on every non-NVLink rig, so without this the verdict reads
-    # "custom all-reduce ON" while the kernel is off — the #922 false-ON, on a
-    # shipped slug, and a regression against the legacy cascade.
-    *"disable_custom_all_reduce=True"*) engine_verdict=operator ;;
+    # SGLang's Python repr uses a dict field instead; the normalized BOOT marker
+    # lets the same classifier distinguish that deliberate opt-out.
+    *"disable_custom_all_reduce=True"*|*"[sglang] BOOT disable_custom_all_reduce=True"*)
+                                                               engine_verdict=operator ;;
   esac
 
   # ── Step 3: OUR configured state, as data ────────────────────────────────
@@ -177,6 +223,7 @@ p2p_classify_engagement() {
     case "$engine_verdict" in
       degraded) echo nccl_only_degraded; return 0 ;;
       nolib)    echo nccl_only_nolib;    return 0 ;;
+      failed)   echo nccl_only_failed;   return 0 ;;
       gated)    echo nccl_only_gated;    return 0 ;;
       operator) echo nccl_only_operator; return 0 ;;
     esac
@@ -208,18 +255,25 @@ p2p_classify_engagement() {
   case "$text" in
     *"missing custom allreduce library"*) echo nccl_only_nolib; return 0 ;;
   esac
+  # Before the operator case: this line's advice suffix ("specify
+  # --disable-custom-all-reduce explicitly") would otherwise read as an opt-out.
   case "$text" in
-    *"Custom allreduce is disabled"*|*"custom all-reduce engine-gated"*)
+    *"Setup Custom allreduce failed"*)
+      case "$text" in *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*|*NCCL_P2P_DISABLE=1*) echo off; return 0 ;; esac
+      echo nccl_only_failed; return 0 ;;
+  esac
+  case "$text" in
+    *"Custom allreduce is disabled"*|*"CustomAllreduce is disabled"*|*"CustomAllReduceV2 is disabled"*|*"custom all-reduce engine-gated"*)
       case "$text" in *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*|*NCCL_P2P_DISABLE=1*) echo off; return 0 ;; esac
       echo nccl_only_gated; return 0 ;;
   esac
   case "$text" in
-    *"disable_custom_all_reduce=True"*|*"--disable-custom-all-reduce"*|*"custom all-reduce OFF by operator request"*)
+    *"disable_custom_all_reduce=True"*|*"[sglang] BOOT disable_custom_all_reduce=True"*|*"--disable-custom-all-reduce"*|*"custom all-reduce OFF by operator request"*)
       case "$text" in *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*|*NCCL_P2P_DISABLE=1*) echo off; return 0 ;; esac
       echo nccl_only_operator; return 0 ;;
   esac
   case "$text" in
-    *"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
+    *"All Reduce config:"*|*" cuda graph addresses"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
   esac
   case "$text" in
     *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*) echo off; return 0 ;;
@@ -261,11 +315,14 @@ p2p_verdict() {
     nccl_only_nolib)
       echo "ℹ interconnect: P2P transport is up, but this image has no custom all-reduce library to run (non-GPU or stripped build). Peer transfers still go via NCCL."
       return 0 ;;
+    nccl_only_failed)
+      echo "⚠️ interconnect WARN: custom all-reduce was requested (disable_custom_all_reduce=False) but its SETUP FAILED and the engine fell back to NCCL — the kernel is NOT running, whatever the boot args say. The engine log's 'Setup Custom allreduce failed with …' line names the cause; UUID-form CUDA_VISIBLE_DEVICES was one (club-3090#1462, now remapped in the SGLang composes). Custom-AR benchmarks from this boot measure NCCL."
+      return 0 ;;
   esac
   case "$eng" in
     on|nccl_only_gated) state="" ;;
     off)     state="is running with P2P OFF" ;;
-    unknown) state="shows no P2P engagement signal (no [nvlink] boot line / NCCL env)" ;;
+    unknown) state="shows no P2P engagement signal (no [nvlink] / engine all-reduce line / NCCL env)" ;;
     *)       return 0 ;;
   esac
   case "$cap:$eng" in
@@ -274,9 +331,9 @@ p2p_verdict() {
     pcie_p2p:on)
       echo "✓ interconnect: PCIe P2P engaged (patched driver, custom all-reduce ON)" ;;
     pcie_p2p:nccl_only_gated)
-      echo "✓ interconnect: PCIe P2P engaged via NCCL peer transfers. vLLM auto-disabled its custom all-reduce kernel — expected at >2 PCIe-only GPUs (its gate checks NVLink, not peer access; #786), NOT a misconfiguration. P2P is still active on the NCCL path." ;;
+      echo "✓ interconnect: PCIe P2P engaged via NCCL peer transfers. The engine auto-disabled its custom all-reduce kernel — expected at >2 PCIe-only GPUs (the vLLM/SGLang gate checks NVLink, not peer access; #786), NOT a misconfiguration. P2P is still active on the NCCL path." ;;
     nvlink:nccl_only_gated)
-      echo "✓ interconnect: P2P engaged via NCCL peer transfers, but vLLM disabled its custom all-reduce — the NVLink mesh is not fully connected across all GPUs (vLLM requires full 1-hop connectivity at world>2). Peer transfers remain active." ;;
+      echo "✓ interconnect: P2P engaged via NCCL peer transfers, but the engine disabled its custom all-reduce — the NVLink mesh is not fully connected across all GPUs (vLLM/SGLang require full 1-hop connectivity at world>2). Peer transfers remain active." ;;
     nvlink:*)
       echo "⚠ interconnect WARN: an NVLink bridge is present on this host but the serving container ${state} — the bridge is idle. On modern vLLM the NVLink win is workload-shaped: small on decode (~3-5%) but large on prefill / long-context (+35-49%) (BENCHMARKS #698; the ~15% #77 figure was the older v7.72.2 image). Boot via launch.sh/switch.sh (auto-detects) or set NVLINK_MODE=force_on; if auto-detect misses on your rig, please file it. Full guide: docs/PCIE_P2P.md" ;;
     pcie_p2p:*)

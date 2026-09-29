@@ -4,6 +4,7 @@
 # AUDITOR (p2p_host_capability) against the same faked nvidia-smi and asserts
 # they agree — the two parse the same probes and must not drift.
 set -euo pipefail
+export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
 
 # ⚠️ Pin the knob, like NVLINK_MODE. Nothing else scrubs it, so an operator with
 # DISABLE_CUSTOM_ALL_REDUCE exported in their shell — which our own boot warning
@@ -68,6 +69,98 @@ r="$(echo '' | p2p_classify_engagement)"
 # boot trail beats env: a trail that resolved OFF wins over a leftover LEVEL var
 r="$(printf '%s\n%s' '[nvlink] NVLINK_MODE=force_off — forcing PCIe mode (P2P off)' 'NCCL_P2P_LEVEL=PHB' | p2p_classify_engagement)"
 [[ "$r" == "off" ]] || fail "trail-over-env precedence (got $r)"
+
+# SGLang v0.5.20 has no [nvlink] STATE line, but its runtime gives us
+# stronger engine evidence: NCCL's loaded version and the custom communicator's
+# successful initialization. These are real pinned-image wordings.
+_sgl_raw=$(cat <<'EOF'
+[2026-09-25 02:37:55] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
+[2026-09-25 02:38:08 TP0] sglang is using nccl==2.30.7
+[2026-09-25 02:38:26 TP0] All Reduce config: symmetric_memory = 20.01 MB, local_buffer = 2.00 MB, multicast = False, pull = True
+EOF
+)
+_sgl_evidence="$(printf '%s\n' "$_sgl_raw" | p2p_engine_log_evidence)"
+assert_contains "$_sgl_evidence" "[sglang] BOOT disable_custom_all_reduce=False"
+assert_contains "$_sgl_evidence" "sglang is using nccl==2.30.7"
+assert_contains "$_sgl_evidence" "All Reduce config:"
+r="$(printf '%s\n' "$_sgl_evidence" | p2p_classify_engagement)"
+[[ "$r" == "on" ]] || fail "SGLang All Reduce config -> custom AR on (got $r)"
+# A request to enable is not runtime proof: without the init line it stays unknown.
+r="$(printf '%s' "[sglang] BOOT disable_custom_all_reduce=False" | p2p_classify_engagement)"
+[[ "$r" == "unknown" ]] || fail "SGLang requested-on without init proof -> unknown (got $r)"
+# The final boot marker owns the lines after it. Never leak an earlier success
+# into an operator-disabled restart.
+r="$(printf '%s\n%s' "$_sgl_evidence" "[sglang] BOOT disable_custom_all_reduce=True" | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_operator" ]] || fail "latest SGLang operator-disabled boot wins (got $r)"
+# SGLang copied the same topology/P2P gates but names its classes differently.
+r="$(printf '%s\n' '[sglang] BOOT disable_custom_all_reduce=False' 'CustomAllReduceV2 is disabled because your platform lacks GPU P2P capability or P2P test failed. To silence this warning, specify disable_custom_all_reduce=True explicitly.' | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_degraded" ]] || fail "SGLang P2P veto -> degraded (got $r)"
+r="$(printf '%s\n' '[sglang] BOOT disable_custom_all_reduce=False' "CustomAllreduce is disabled because it's not supported on more than two PCIe-only GPUs." | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_gated" ]] || fail "SGLang topology veto -> gated (got $r)"
+unset _sgl_raw _sgl_evidence
+echo "  ✓ SGLang runtime: NCCL + custom-AR init classified; restart epoch and vetoes preserved"
+
+# ⭐ #1462: SGLang catches ANY exception while building its custom all-reduce, logs
+# one warning and falls back to NCCL — while server_args still say it is enabled.
+# There is no "All Reduce config" line on this path (that is CustomAllReduceV2's
+# success log), so before this fix the boot scored "unknown", not the failure it is.
+# Real wording, sglang/srt/distributed/parallel_state.py (v0.5.19 and v0.5.20).
+_sgl_fail=$(cat <<'EOF'
+[2026-09-27 21:10:02] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
+[2026-09-27 21:10:14 TP0] sglang is using nccl==2.30.7
+[2026-09-27 21:10:15 TP0] Setup Custom allreduce failed with invalid literal for int() with base 10: 'GPU-0e72aaaa-0000-0000-0000-000000000000'. To silence this warning, specify --disable-custom-all-reduce explicitly.
+EOF
+)
+_ev="$(printf '%s\n' "$_sgl_fail" | p2p_engine_log_evidence)"
+assert_contains "$_ev" "Setup Custom allreduce failed"
+r="$(printf '%s\n' "$_ev" | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_failed" ]] || fail "SGLang custom-AR setup failure -> nccl_only_failed (got $r)"
+# Its advice suffix names --disable-custom-all-reduce: it must NOT read as an opt-out.
+[[ "$r" != "nccl_only_operator" ]] || fail "setup-failure advice read as an operator opt-out"
+r="$(printf '%s\n' "$_sgl_fail" | p2p_classify_engagement)"   # unfiltered stream too
+[[ "$r" == "nccl_only_failed" ]] || fail "unfiltered SGLang setup failure -> nccl_only_failed (got $r)"
+# Restart epochs: a failed boot must not taint a later clean one, and vice versa.
+_ok_boot="$(printf '%s\n' "[sglang] BOOT disable_custom_all_reduce=False" "All Reduce config: symmetric_memory = 20.01 MB, local_buffer = 2.00 MB, multicast = False, pull = True")"
+r="$(printf '%s\n%s' "$_ev" "$_ok_boot" | p2p_classify_engagement)"
+[[ "$r" == "on" ]] || fail "clean restart after a failed setup -> on (got $r)"
+r="$(printf '%s\n%s' "$_ok_boot" "$_ev" | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_failed" ]] || fail "failed restart after a clean boot -> nccl_only_failed (got $r)"
+out="$(p2p_verdict 2 pcie_p2p nccl_only_failed)"; assert_contains "$out" "SETUP FAILED"
+assert_contains "$out" "#1462"
+unset _sgl_fail _ev _ok_boot
+echo "  ✓ SGLang custom-AR setup failure classified as a fallback, not an opt-out or unknown (#1462)"
+
+# ⭐ SGLang admits CustomAllReduceV2 only on full NVLink (can_use_custom_all_reduce_v2),
+# so every PCIe rig runs the V1 CustomAllreduce, which logs NOTHING when it initializes.
+# Its only success signal is the graph-buffer registration after CUDA-graph capture.
+# Before this rule a live V1 kernel scored "unknown": the classifier could never report
+# custom AR on for SGLang over PCIe. Real lines, v0.5.20, 2x3090 PCIe P2P, 2026-09-28.
+_sgl_v1=$(cat <<'EOF'
+[2026-09-28 04:36:56] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
+[2026-09-28 04:37:09 TP0] sglang is using nccl==2.30.7
+[2026-09-28 04:38:16 TP0] Registering 4352 cuda graph addresses
+[2026-09-28 04:38:20 TP0] Registering 258 cuda graph addresses
+[2026-09-28 04:38:23 TP0] Registering 6 cuda graph addresses
+EOF
+)
+_ev="$(printf '%s\n' "$_sgl_v1" | p2p_engine_log_evidence)"
+assert_contains "$_ev" "Registering 4352 cuda graph addresses"
+r="$(printf '%s\n' "$_ev" | p2p_classify_engagement)"
+[[ "$r" == "on" ]] || fail "SGLang V1 graph-buffer registration -> on (got $r)"
+r="$(printf '%s\n' "$_sgl_v1" | p2p_classify_engagement)"   # unfiltered stream too
+[[ "$r" == "on" ]] || fail "unfiltered SGLang V1 registration -> on (got $r)"
+# Positive control for the rule above: the same boot WITHOUT the registration lines
+# is still unknown — the lines, not the boot args, are what score it on.
+r="$(printf '%s\n' "$_sgl_v1" | command grep -v 'cuda graph addresses' | p2p_engine_log_evidence | p2p_classify_engagement)"
+[[ "$r" == "unknown" ]] || fail "SGLang requested-on without V1 registration -> unknown (got $r)"
+# Restart epochs: a V1-on boot must not make a later operator-disabled or failed boot read on.
+r="$(printf '%s\n%s' "$_ev" "[sglang] BOOT disable_custom_all_reduce=True" | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_operator" ]] || fail "operator restart after a V1-on boot -> nccl_only_operator (got $r)"
+r="$(printf '%s\n%s\n%s' "$_ev" "[sglang] BOOT disable_custom_all_reduce=False" "Setup Custom allreduce failed with boom. To silence this warning, specify --disable-custom-all-reduce explicitly." | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_failed" ]] || fail "failed restart after a V1-on boot -> nccl_only_failed (got $r)"
+out="$(p2p_verdict 2 pcie_p2p on)"; assert_contains "$out" "custom all-reduce ON"
+unset _sgl_v1 _ev
+echo "  ✓ SGLang V1 custom all-reduce (every PCIe rig) scored on from its graph-buffer registration"
 
 # ── 3. capability probes via faked nvidia-smi ────────────────────────────────
 mk_smi() { cat > "$TMP/nvidia-smi" <<EOF
@@ -379,6 +472,9 @@ S_OFF="$(NVLINK_MODE=force_off PATH="$TMP:$PATH" bash -c 'source scripts/detect_
 [ -n "$S_OFF" ] || fail "the decider emits NO STATE line on a transport-off boot — the transport=off arm would be dead"
 case "$S_OFF" in *"transport=off"*) ;; *) fail "force_off boot must report transport=off, got: $S_OFF" ;; esac
 V_FAIL='Custom allreduce is disabled because your platform lacks GPU P2P capability or P2P test failed.'
+# #1462 on the STATE path too: our config said kernel=on, the engine's setup threw.
+r="$(printf '%s\n%s' "$S_ON" "Setup Custom allreduce failed with boom. To silence this warning, specify --disable-custom-all-reduce explicitly." | p2p_classify_engagement)"
+[[ "$r" == "nccl_only_failed" ]] || fail "STATE kernel=on + engine setup failure -> nccl_only_failed (got $r)"
 # ⚠️ vLLM's REAL text, advice sentence included. Without it this fixture scored
 # `gated` even with the operator arm mis-ordered ahead of the catch-all, so it
 # passed against a mutation that genuinely misclassifies this exact line.

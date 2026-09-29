@@ -330,10 +330,26 @@ if [[ -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
   _DEFAULT_ENDPOINT_PORT="$(registry_lookup_default_port qwen3.6-27b 2>/dev/null || true)"
 fi
 URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
-# Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
-# literal below is only a last resort if detection no-ops (endpoint unreachable).
+# Resolve the served model from /v1/models when MODEL is unset (#372).
 declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
-MODEL="${MODEL:-qwen3.6-27b}"
+# #1330: NOT an unconditional `MODEL="${MODEL:-…}"` any more. That fell back to
+# a qwen literal whenever autodetect no-op'd — including against a server that
+# was merely still LOADING — so every request 404'd and the run looked like the
+# config under test was broken. preflight_resolve_model_or_fail refuses the
+# literal exactly when we know better (endpoint unreachable, or we picked the
+# container ourselves and it reports no model) and keeps it otherwise.
+# ⚠️ BENCH_MOCK=1 means "there is deliberately no server" — it short-circuits
+# below at the BENCH_MOCK branch, before any request is made. Refusing here
+# would kill every mocked bench run, and it did: test-bench-capture drives
+# `BENCH_MOCK=1 bash bench.sh` with stderr to /dev/null under `set -e`, so the
+# refusal aborted the whole test SILENTLY, one line after its last ✓.
+# The rule still holds — a guess is fine when we know nothing, and under mock
+# we know there is nothing to know.
+if [[ "${BENCH_MOCK:-0}" != "1" ]] && declare -F preflight_resolve_model_or_fail >/dev/null; then
+  preflight_resolve_model_or_fail "qwen3.6-27b" || exit 1
+else
+  MODEL="${MODEL:-qwen3.6-27b}"
+fi
 if [[ -z "${CONTAINER:-}" && -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
   # The old literal default 'vllm-qwen36-27b' matches NO registry container, so
   # the docker-inspect/exec consumers below silently no-op'd on an undetected
@@ -2114,7 +2130,7 @@ bench_interconnect_block() {
   declare -F p2p_gpu_count >/dev/null || return 0
   command -v nvidia-smi >/dev/null 2>&1 || return 0
 
-  local ngpu cap flavor eng_text nccl_line l3 verdict
+  local ngpu cap flavor eng_text nccl_line nccl_runtime l3 verdict
   ngpu="$(p2p_gpu_count 2>/dev/null || echo 0)"
 
   echo ""
@@ -2138,9 +2154,32 @@ bench_interconnect_block() {
     *)        echo "  layer 1  driver P2P grant : REFUSED — topo -p2p reports no all-pairs OK; kernel module: ${flavor}" ;;
   esac
 
+  # ExLlamaV3 uses layer-split CUDA transfers, not NCCL collectives or a
+  # custom all-reduce kernel. The driver capability probe above still applies,
+  # but the NCCL/custom-AR layers and their shared verdict classifier do not.
+  # Reporting them as "unknown" would incorrectly suggest that interconnect
+  # setup failed (the same TabbyAPI-vs-llama.cpp classification trap as #1366).
+  if [[ "$ENGINE_KIND" == "exllamav3" ]]; then
+    echo "  layer 2  NCCL use         : n/a — ExLlamaV3 layer-split does not use NCCL collectives"
+    echo "  layer 3  engine custom-AR : n/a — ExLlamaV3 layer-split; no custom all-reduce kernel"
+    echo "  verdict  : ℹ interconnect capability is reported above; ExLlamaV3's layer-split transport is engine-specific and is not measured by the NCCL/custom-AR probes"
+    return 0
+  fi
+
+  # Gather the ordered engine evidence once. p2p_engine_log_evidence keeps
+  # vLLM and SGLang on the same classifier contract while reducing SGLang's
+  # enormous server_args dict to a short boot marker.
+  eng_text=""
+  if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
+     && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+    eng_text="$(docker logs "$CONTAINER" 2>&1 | p2p_engine_log_evidence || true)"
+  fi
+
   # ---- layer 2: NCCL use ---------------------------------------------------
   # Container env first (the serving process's RESOLVED value, post-entrypoint),
-  # then the bare-metal server's /proc environ, then our own.
+  # then the bare-metal server's /proc environ. SGLang also logs successful
+  # NCCL initialization; report it even when transport policy is left at the
+  # engine default and therefore has no NCCL_* env override.
   nccl_line=""
   if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
      && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
@@ -2157,23 +2196,19 @@ bench_interconnect_block() {
       [[ -n "$got" ]] && nccl_line="${nccl_line}${nccl_line:+ }${v}=${got}"
     done
   fi
-  if [[ -n "$nccl_line" ]]; then
+  nccl_runtime="$(printf '%s\n' "$eng_text" | command grep -F 'sglang is using nccl==' | tail -n 1 \
+    | sed -n 's/.*\(sglang is using nccl==[^[:space:]]*\).*/\1/p')"
+  if [[ -n "$nccl_runtime" && -n "$nccl_line" ]]; then
+    echo "  layer 2  NCCL use         : initialized — ${nccl_runtime}; policy: ${nccl_line}"
+  elif [[ -n "$nccl_runtime" ]]; then
+    echo "  layer 2  NCCL use         : initialized — ${nccl_runtime}; P2P policy: engine default (no NCCL_P2P*/NVLINK_MODE override)"
+  elif [[ -n "$nccl_line" ]]; then
     echo "  layer 2  NCCL use         : ${nccl_line}"
   else
     echo "  layer 2  NCCL use         : no NCCL_P2P*/NVLINK_MODE in the serving environment (engine default)"
   fi
 
   # ---- layer 3: engine custom-AR -------------------------------------------
-  # The classifier wants the same text report.sh feeds it: the [nvlink] decision
-  # trail + vLLM's own gate line + the resolved env.
-  eng_text=""
-  if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
-     && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
-    # ⚠️ NO head/-m1. The classifier slices the log to the CURRENT BOOT using the
-    # last [nvlink] STATE line; taking the FIRST matches hands it an older boot's
-    # record and it reports the wrong rig (#1332 review). Feed the log in order.
-    eng_text="$(docker logs "$CONTAINER" 2>&1 | command grep -E '\[nvlink\]|Custom allreduce is disabled|disable_custom_all_reduce=True' || true)"
-  fi
   if [[ "$ENGINE_KIND" == "llamacpp" || "${CONTAINER:-}" == "none" ]]; then
     # llama.cpp/ik-llama split layers across cards with plain copies — there is
     # no custom all-reduce kernel to engage or veto. Saying "off" would read as
@@ -2181,14 +2216,15 @@ bench_interconnect_block() {
     l3="engine: ${ENGINE_KIND/llamacpp/llama.cpp} — custom-AR n/a"
   else
     case "$(printf '%s\n%s' "$eng_text" "$nccl_line" | p2p_classify_engagement 2>/dev/null || echo unknown)" in
-      on)        l3="ENGAGED — engine reports its custom all-reduce ON" ;;
+      on)        l3="ENGAGED — engine initialized its custom all-reduce kernel" ;;
       nccl_only_operator) l3="custom-AR OFF (operator), P2P LIVE — --disable-custom-all-reduce / DISABLE_CUSTOM_ALL_REDUCE=1. Peer transfers still go via NCCL. Healthy, deliberate" ;;
-      nccl_only_gated)    l3="custom-AR OFF (engine-gated), P2P LIVE — vLLM's NVLink-only gate at world>2 (#786). Peer transfers still go via NCCL. Healthy" ;;
+      nccl_only_gated)    l3="custom-AR OFF (engine-gated), P2P LIVE — the vLLM/SGLang NVLink-only gate at world>2 (#786). Peer transfers still go via NCCL. Healthy" ;;
       nccl_only_degraded) l3="⚠️ custom-AR OFF (P2P BROKEN) — the engine refused its kernel because peer access is missing or its P2P TEST FAILED. NOT an operator choice and NOT healthy; the grant can be advertised while transfers fail (#873). Run scripts/p2p-validate.sh" ;;
       nccl_only_nolib)    l3="custom-AR unavailable — this image has no custom all-reduce library. Peer transfers still go via NCCL" ;;
+      nccl_only_failed)   l3="⚠️ custom-AR SETUP FAILED — requested, but the engine logged 'Setup Custom allreduce failed' and fell back to NCCL (#1462). The kernel is NOT running; a custom-AR A/B from this boot measures NCCL" ;;
       off)       l3="OFF — the serving container resolved to PCIe/no-P2P mode" ;;
       requested) l3="REQUESTED but UNVERIFIED — P2P forced on without a driver grant (#688)" ;;
-      *)         l3="unknown — no [nvlink] boot line and no engine gate line in the log" ;;
+      *)         l3="unknown — no current-boot custom all-reduce initialization or veto line" ;;
     esac
   fi
   echo "  layer 3  engine custom-AR : ${l3}"
@@ -2251,5 +2287,12 @@ fi
 # container and skip cleanly via the guard's own unavailable path.
 if [[ -z "${BENCH_MOCK:-}" ]]; then
   restart_guard_check "${_RESTARTS_BEFORE:-}" "${CONTAINER:-}" "bench" || _RESTART_RC=$?
-  [[ "${_RESTART_RC:-0}" == "1" ]] && exit 90
+  # ⚠️ An `if`, NOT `[[ … ]] && exit 90`. This is the script's LAST command, so the
+  # bare `&&` form's status IS bench.sh's exit code — and it is 1 whenever there
+  # was no restart. Every clean bench exited 1 from 39343b46 (2026-09-20) until this
+  # was fixed, and report.sh rendered each one FAIL. test-engine-restart-guard runs
+  # this exact block (the mock path above skips it, which is how it went unseen).
+  if [[ "${_RESTART_RC:-0}" == "1" ]]; then
+    exit 90
+  fi
 fi
