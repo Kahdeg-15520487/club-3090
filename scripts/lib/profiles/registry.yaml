@@ -1491,7 +1491,7 @@ entries:
     default_port: 8037
     kvcalc_key: SKIP
     status: experimental
-    status_note: "Artemis-31B-v1m (BeaverAI uncensored fine-tune of Gemma-4-31B) Q4_K_M GGUF + DFlash, dual 3090 layer-split. Same architecture/Draft as gemma-dflash-dual — DFlash draft cross-compatible. Not yet validated (preset, local-only). Boot with --force."
+    status_note: "Artemis-31B-v1.2 (published release; replaced the v1m Beta) — mradermacher Q4_K_M GGUF, dual 3090 layer-split, 131K ctx. Uncensored Gemma-4-31B fine-tune. No spec-dec (v1.2 vocab drift). Local preset. Boot with --force."
     weights_companions:
       - anbeeld-dflash-iq4xs
     gateway: false

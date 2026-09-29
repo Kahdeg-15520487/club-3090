@@ -1,6 +1,6 @@
 # ===========================================================================
 # Profile (at-a-glance):
-#   Model:     Artemis-31B-v1m (BeaverAI uncensored fine-tune of Gemma-4-31B, Q4_K_M GGUF)
+#   Model:     Artemis-31B-v1.2 (mradermacher Q4_K_M GGUF — published release; replaced the v1m Beta)
 #   Engine:    beellama.cpp (Anbeeld llama.cpp fork — DFlash spec-dec + SWA windowed KV)
 #   Topology:  Dual 3090 (layer-split across both cards, PCIe — no NVLink needed)
 #   Drafter:   none (DFlash incompatible — Artemis has different vocab than base Gemma)
@@ -17,7 +17,7 @@
 #              Runs without spec-dec. ~3-4× slower than DFlash would be. Unvalidated.
 #   Best for:  Uncensored Gemma-4-31B fine-tune — creative writing, roleplay (no spec-dec)
 # ---------------------------------------------------------------------------
-# Artemis-31B-v1m on beellama.cpp — DUAL 3090, Q4_K_M + DFlash (Anbeeld IQ4_XS draft),
+# Artemis-31B-v1.2 on beellama.cpp — DUAL 3090, Q4_K_M GGUF, no spec-dec (v1.2 vocab drift),
 # q5_0/q4_1 KV, layer-split across both cards, 131K ctx.
 #
 # This is a local preset — NOT in the catalog registry. Boot directly:
@@ -28,15 +28,15 @@
 #
 # First download the GGUFs:
 #   cd $MODEL_DIR
-#   mkdir -p artemis-31b-gguf gemma-4-31b-gguf/anbeeld-dflash-iq4xs
-#   hf download BeaverAI/Artemis-31B-v1m-GGUF Artemis-31B-v1m-Q4_K_M.gguf \
-#     --local-dir artemis-31b-gguf
+#   mkdir -p artemis-31b-v12-gguf
+#   hf download mradermacher/Artemis-31B-v1.2-GGUF Artemis-31B-v1.2.Q4_K_M.gguf \
+#     --local-dir artemis-31b-v12-gguf
 #   hf download Anbeeld/gemma-4-31B-it-DFlash-GGUF gemma4-31b-it-dflash-Q4_K_M.gguf \
 #     --local-dir gemma-4-31b-gguf/anbeeld-dflash-iq4xs
 #
 # Override via .env or shell:
 #   MODEL_DIR       host dir mounted as /models
-#   GGUF_FILE       target GGUF under /models (default: artemis-31b-gguf/Artemis-31B-v1m-Q4_K_M.gguf)
+#   GGUF_FILE       target GGUF under /models (default: artemis-31b-v12-gguf/Artemis-31B-v1.2.Q4_K_M.gguf)
 #   DRAFT_FILE      DFlash draft GGUF under /models
 #   CTX_SIZE        KV pool size (default: 131072)
 #   PORT            host port (default: 8064)
@@ -53,7 +53,7 @@ services:
     command: >-
       --host 0.0.0.0
       --port 8080
-      -m /models/${GGUF_FILE:-artemis-31b-gguf/Artemis-31B-v1m-Q4_K_M.gguf}
+      -m /models/${GGUF_FILE:-artemis-31b-v12-gguf/Artemis-31B-v1.2.Q4_K_M.gguf}
       -ngl all
       --split-mode ${SPLIT_MODE:-layer}
       --main-gpu ${MAIN_GPU:-0}

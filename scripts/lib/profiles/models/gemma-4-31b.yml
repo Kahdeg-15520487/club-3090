@@ -145,14 +145,15 @@ weights:
     engine: beellama
     kind: draft
   artemis-q4km-dflash:
-    path: artemis-31b-gguf
-    local_subdir: artemis-31b-gguf
+    path: artemis-31b-v12-gguf
+    local_subdir: artemis-31b-v12-gguf
     size_gb: 18.0
     format: gguf
     status: experimental
-    hf_repo: BeaverAI/Artemis-31B-v1m-GGUF
+    hf_repo: mradermacher/Artemis-31B-v1.2-GGUF
     files:
-      - Artemis-31B-v1m-Q4_K_M.gguf
+      - Artemis-31B-v1.2.Q4_K_M.gguf
+    manual_note: "Replaces the retired Artemis-31B-v1m (Beta) — v1.2 is the published release (2026-09-29). Q4_K_M GGUF."
     engine: beellama
     kind: gguf
     verify_glob: "*.gguf"
